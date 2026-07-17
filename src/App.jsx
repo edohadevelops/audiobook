@@ -1,9 +1,15 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { createClient } from "@supabase/supabase-js";
-
-const SUPABASE_URL = "https://fitbqjgzbplvozkpdijf.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpdGJxamd6YnBsdm96a3BkaWpmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAxMzI0NTcsImV4cCI6MjA5NTcwODQ1N30.hx_8J_vcJI1iNlMtVwpW8tnaaG5Twb28UVYZRrlmjRs";
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+import { supabase, supabaseConfigError } from "./supabaseClient";
+import {
+  fetchBooks as dbFetchBooks,
+  recordCompletion,
+  flushListenSession,
+  updateBookMeta,
+  fetchRecentCompletions,
+} from "./lib/db";
+import Journal from "./screens/Journal";
+import Goals from "./screens/Goals";
+import Wrapped from "./screens/Wrapped";
 
 const CHUNK_SIZE = 4000;
 
@@ -73,7 +79,7 @@ async function generateAndCacheAudio(text, apiKey, bookId, chunkIndex, voice, fo
       .eq("book_id", bookId)
       .eq("chunk_index", chunkIndex)
       .eq("voice_id", voiceKey)
-      .single();
+      .maybeSingle();
     if (cached?.audio_path) {
       const { data } = supabase.storage.from("audio").getPublicUrl(cached.audio_path);
       return data.publicUrl;
@@ -128,6 +134,7 @@ export default function App() {
   const [apiKey] = useState(import.meta.env.VITE_GOOGLE_TTS_KEY || "");
   const [books, setBooks] = useState([]);
   const [loadingBooks, setLoadingBooks] = useState(true);
+  const [booksError, setBooksError] = useState("");
   const [activeBook, setActiveBook] = useState(null);
   const [chunks, setChunks] = useState([]);
   const [cachedChunks, setCachedChunks] = useState({});
@@ -147,10 +154,42 @@ export default function App() {
   const [selectedVoice, setSelectedVoice] = useState(VOICE_OPTIONS[0]);
   const [showVoiceDropdown, setShowVoiceDropdown] = useState(false);
   const [showRegenConfirm, setShowRegenConfirm] = useState(false);
-  const audioRef = useRef(null);
+  // Library browsing
+  const [search, setSearch] = useState("");
+  const [activeCategory, setActiveCategory] = useState("");
+  const [recentDone, setRecentDone] = useState([]);
+  // Upload details form
+  const [pendingUpload, setPendingUpload] = useState(null);
+  // Completion CTA
+  const [justFinished, setJustFinished] = useState(false);
+
+  // Two audio elements for gapless (double-buffered) playback.
+  const audioRef0 = useRef(null);
+  const audioRef1 = useRef(null);
+  const audioRefs = [audioRef0, audioRef1];
+  const activeIdx = useRef(0);
+  const bufferedChunkRef = useRef(null); // chunk index currently buffered in the idle element
+  const getActive = () => audioRefs[activeIdx.current].current;
+  const getIdle = () => audioRefs[activeIdx.current === 0 ? 1 : 0].current;
+
   const fileInputRef = useRef(null);
   const progressSaveRef = useRef(null);
   const dropdownRef = useRef(null);
+
+  // Refs mirroring state, so the imperative audio logic never reads stale values.
+  const chunksRef = useRef([]);
+  const currentChunkRef = useRef(0);
+  const speedRef = useRef(1);
+  const audioUrlsRef = useRef({});
+  const activeBookRef = useRef(null);
+  const listenAccumRef = useRef(0);
+  const lastPosRef = useRef(0);
+
+  useEffect(() => { chunksRef.current = chunks; }, [chunks]);
+  useEffect(() => { currentChunkRef.current = currentChunk; }, [currentChunk]);
+  useEffect(() => { speedRef.current = speed; }, [speed]);
+  useEffect(() => { audioUrlsRef.current = audioUrls; }, [audioUrls]);
+  useEffect(() => { activeBookRef.current = activeBook; }, [activeBook]);
 
   useEffect(() => { fetchBooks(); }, []);
 
@@ -160,16 +199,16 @@ export default function App() {
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  // When voice changes, clear in-memory audio urls so new voice is used
+  // When voice changes, drop in-memory urls + buffered audio so the new voice is used.
   useEffect(() => {
     setAudioUrls({});
-    // Update cached status for new voice
-    if (activeBook) {
-      refreshCachedChunks(activeBook.id, selectedVoice.id);
-    }
+    audioUrlsRef.current = {};
+    bufferedChunkRef.current = null;
+    if (activeBook) refreshCachedChunks(activeBook.id, selectedVoice.id);
   }, [selectedVoice]);
 
   const refreshCachedChunks = async (bookId, voiceId) => {
+    if (!supabase) return;
     const { data } = await supabase
       .from("audio_chunks")
       .select("chunk_index")
@@ -182,15 +221,18 @@ export default function App() {
 
   const fetchBooks = async () => {
     setLoadingBooks(true);
-    const { data } = await supabase
-      .from("books")
-      .select("*, reading_progress(*)")
-      .order("created_at", { ascending: false });
+    setBooksError("");
+    const { data, error } = await dbFetchBooks();
+    if (error) setBooksError(error.message);
     setBooks(data || []);
     setLoadingBooks(false);
+    const rc = await fetchRecentCompletions(5);
+    setRecentDone(rc.data || []);
   };
 
-  const handleFileUpload = async (file) => {
+  // ---- Upload flow: pick file -> collect details -> add to library ----------
+
+  const handleFilePick = async (file) => {
     if (!file || file.type !== "application/pdf") { setError("Please upload a valid PDF file."); return; }
     setError("");
     setUploading(true);
@@ -199,17 +241,42 @@ export default function App() {
       const text = await extractTextFromPDF(file);
       if (!text) throw new Error("No readable text found. The PDF may be scanned.");
       const c = chunkText(text);
-      const title = file.name.replace(".pdf", "");
-      setLoadingMsg("Uploading to library…");
+      setPendingUpload({
+        file, text, chunks: c,
+        title: file.name.replace(/\.pdf$/i, ""),
+        author: "",
+        category: "",
+      });
+    } catch (e) {
+      setError(e.message);
+    }
+    setUploading(false);
+    setLoadingMsg("");
+  };
+
+  const handleConfirmUpload = async () => {
+    if (!pendingUpload || !supabase) return;
+    const { file, text, chunks: c, title, author, category } = pendingUpload;
+    setUploading(true);
+    setLoadingMsg("Uploading to library…");
+    try {
       const filePath = `${Date.now()}_${file.name}`;
       const { error: uploadError } = await supabase.storage.from("books").upload(filePath, file);
       if (uploadError) throw uploadError;
       const { data: bookData, error: bookError } = await supabase
         .from("books")
-        .insert({ title, file_path: filePath, word_count: text.split(/\s+/).filter(Boolean).length, chunk_count: c.length })
+        .insert({
+          title: title.trim() || file.name,
+          author: author.trim() || null,
+          category: category.trim() || null,
+          file_path: filePath,
+          word_count: text.split(/\s+/).filter(Boolean).length,
+          chunk_count: c.length,
+        })
         .select().single();
       if (bookError) throw bookError;
       await supabase.from("reading_progress").insert({ book_id: bookData.id, current_chunk: 0, current_position: 0 });
+      setPendingUpload(null);
       await fetchBooks();
       setUploading(false);
       setLoadingMsg("");
@@ -221,25 +288,48 @@ export default function App() {
     }
   };
 
-  const openBook = async (book, preloadedChunks = null) => {
+  const handleEditMeta = async (e, book) => {
+    e.stopPropagation();
+    const author = prompt("Author", book.author || "");
+    if (author === null) return;
+    const category = prompt("Category (e.g. Business, Fiction, Self-help)", book.category || "");
+    if (category === null) return;
+    const { error } = await updateBookMeta(book.id, { author: author.trim() || null, category: category.trim() || null });
+    if (error) { setError(error.message); return; }
+    fetchBooks();
+  };
+
+  // ---- Opening & playback ----------------------------------------------------
+
+  const openBook = async (book, preloadedChunks = null, repeat = false) => {
     setError("");
     setAudioUrls({});
+    audioUrlsRef.current = {};
+    bufferedChunkRef.current = null;
+    activeIdx.current = 0;
+    listenAccumRef.current = 0;
+    lastPosRef.current = 0;
     setIsPlaying(false);
+    setJustFinished(false);
     setActiveBook(book);
+    activeBookRef.current = book;
     setPregenProgress(null);
     setShowRegenConfirm(false);
+    audioRef0.current?.pause();
+    audioRef1.current?.pause();
 
     let c = preloadedChunks;
     if (!c) {
       setIsLoading(true);
       setLoadingMsg("Loading book…");
       try {
-        const { data } = await supabase.storage.from("books").download(book.file_path);
+        const { data, error: dlError } = await supabase.storage.from("books").download(book.file_path);
+        if (dlError) throw dlError;
         const file = new File([data], book.title + ".pdf", { type: "application/pdf" });
         const text = await extractTextFromPDF(file);
         c = chunkText(text);
       } catch (e) {
-        setError(e.message);
+        setError(e.message || "Couldn't load this book from storage.");
         setIsLoading(false);
         return;
       }
@@ -248,11 +338,13 @@ export default function App() {
     }
 
     setChunks(c);
+    chunksRef.current = c;
     await refreshCachedChunks(book.id, selectedVoice.id);
 
     const prog = book.reading_progress?.[0];
-    const savedChunk = prog?.current_chunk || 0;
+    const savedChunk = repeat ? 0 : (prog?.current_chunk || 0);
     setCurrentChunk(savedChunk);
+    currentChunkRef.current = savedChunk;
     setProgress((savedChunk / c.length) * 100);
     setScreen("player");
 
@@ -262,36 +354,66 @@ export default function App() {
   };
 
   const saveProgress = useCallback(async (chunk, position) => {
-    if (!activeBook) return;
-    const prog = activeBook.reading_progress?.[0];
-    if (prog?.id) {
+    const book = activeBookRef.current;
+    if (!book) return;
+    const prog = book.reading_progress?.[0];
+    if (prog?.id && supabase) {
       await supabase.from("reading_progress")
         .update({ current_chunk: chunk, current_position: position, last_opened: new Date().toISOString() })
         .eq("id", prog.id);
     }
-  }, [activeBook]);
+  }, []);
 
-  const preloadChunk = useCallback(async (idx) => {
-    if (!apiKey || !chunks[idx] || audioUrls[idx]) return;
+  const flushListen = useCallback(() => {
+    const secs = Math.floor(listenAccumRef.current);
+    if (secs >= 1 && activeBookRef.current) {
+      flushListenSession(activeBookRef.current.id, secs);
+      listenAccumRef.current -= secs;
+    }
+  }, []);
+
+  // Resolve (generate + cache if needed) the audio URL for a chunk.
+  const ensureUrl = async (idx, forceRegen = false) => {
+    if (!forceRegen && audioUrlsRef.current[idx]) return audioUrlsRef.current[idx];
+    const url = await generateAndCacheAudio(
+      chunksRef.current[idx], apiKey, activeBookRef.current.id, idx, selectedVoice, forceRegen
+    );
+    setAudioUrls(prev => ({ ...prev, [idx]: url }));
+    audioUrlsRef.current = { ...audioUrlsRef.current, [idx]: url };
+    setCachedChunks(prev => ({ ...prev, [idx]: true }));
+    return url;
+  };
+
+  // Buffer the NEXT chunk into the idle audio element (gapless handoff), and
+  // warm the URL for the one after that so long drives never stall.
+  const prepareNext = async (idx) => {
+    const nx = idx + 1;
+    if (!chunksRef.current[nx] || !apiKey) { bufferedChunkRef.current = null; return; }
     try {
-      const url = await generateAndCacheAudio(chunks[idx], apiKey, activeBook.id, idx, selectedVoice);
-      setAudioUrls(prev => ({ ...prev, [idx]: url }));
-      setCachedChunks(prev => ({ ...prev, [idx]: true }));
-    } catch (e) {}
-  }, [apiKey, chunks, audioUrls, activeBook, selectedVoice]);
+      const url = await ensureUrl(nx);
+      const idle = getIdle();
+      if (idle) {
+        idle.src = url;
+        idle.playbackRate = speedRef.current;
+        idle.load();
+        bufferedChunkRef.current = nx;
+      }
+    } catch { /* preload is best-effort */ }
+    // Warm the URL one further ahead (no element needed yet).
+    if (chunksRef.current[nx + 1]) ensureUrl(nx + 1).catch(() => {});
+  };
 
-  const playChunk = useCallback(async (idx, forceRegen = false) => {
-    if (!chunks[idx]) return;
+  const playChunk = async (idx, forceRegen = false) => {
+    if (!chunksRef.current[idx]) return;
     setCurrentChunk(idx);
+    currentChunkRef.current = idx;
     setError("");
-    let url = !forceRegen && audioUrls[idx] ? audioUrls[idx] : null;
+    let url = !forceRegen && audioUrlsRef.current[idx] ? audioUrlsRef.current[idx] : null;
     if (!url) {
       setIsLoading(true);
-      setLoadingMsg(cachedChunks[idx] && !forceRegen ? `Loading part ${idx + 1}…` : `Generating audio for part ${idx + 1} of ${chunks.length}…`);
+      setLoadingMsg(cachedChunks[idx] && !forceRegen ? `Loading part ${idx + 1}…` : `Generating audio for part ${idx + 1} of ${chunksRef.current.length}…`);
       try {
-        url = await generateAndCacheAudio(chunks[idx], apiKey, activeBook.id, idx, selectedVoice, forceRegen);
-        setAudioUrls(prev => ({ ...prev, [idx]: url }));
-        setCachedChunks(prev => ({ ...prev, [idx]: true }));
+        url = await ensureUrl(idx, forceRegen);
       } catch (e) {
         setError(e.message);
         setIsLoading(false);
@@ -301,26 +423,77 @@ export default function App() {
       setIsLoading(false);
       setLoadingMsg("");
     }
-    if (audioRef.current) {
-      audioRef.current.src = url;
-      audioRef.current.playbackRate = speed;
-      audioRef.current.play();
+    const el = getActive();
+    if (el) {
+      el.src = url;
+      el.currentTime = 0;
+      el.playbackRate = speedRef.current;
+      el.play();
       setIsPlaying(true);
     }
-    if (chunks[idx + 1] && !audioUrls[idx + 1]) setTimeout(() => preloadChunk(idx + 1), 1500);
-  }, [chunks, audioUrls, apiKey, speed, preloadChunk, activeBook, cachedChunks, selectedVoice]);
+    lastPosRef.current = 0;
+    prepareNext(idx);
+  };
+
+  // Called when the active element finishes: swap to the pre-buffered idle
+  // element for a gapless transition, or fall back to loading if not ready.
+  const advanceOrFinish = () => {
+    const nx = currentChunkRef.current + 1;
+    if (nx < chunksRef.current.length) {
+      flushListen();
+      if (bufferedChunkRef.current === nx && getIdle()?.src) {
+        activeIdx.current = activeIdx.current === 0 ? 1 : 0;
+        const el = getActive();
+        el.currentTime = 0;
+        el.playbackRate = speedRef.current;
+        el.play();
+        setCurrentChunk(nx);
+        currentChunkRef.current = nx;
+        setIsPlaying(true);
+        lastPosRef.current = 0;
+        prepareNext(nx);
+      } else {
+        playChunk(nx);
+      }
+    } else {
+      finishBook();
+    }
+  };
+
+  const finishBook = async () => {
+    flushListen();
+    const book = activeBookRef.current;
+    setIsPlaying(false);
+    setCurrentChunk(0);
+    currentChunkRef.current = 0;
+    setProgress(100);
+    saveProgress(0, 0);
+    if (book) {
+      await recordCompletion(book.id, book.times_completed || 0);
+      setJustFinished(true);
+      fetchBooks();
+    }
+  };
+
+  const handleMarkFinished = async () => {
+    getActive()?.pause();
+    getIdle()?.pause();
+    await finishBook();
+  };
 
   const handlePlay = async () => {
     if (!apiKey) { setError("VITE_GOOGLE_TTS_KEY not found in .env file."); return; }
     if (!chunks.length) return;
+    const el = getActive();
     if (isPlaying) {
-      audioRef.current?.pause();
+      el?.pause();
       setIsPlaying(false);
-      saveProgress(currentChunk, audioRef.current?.currentTime || 0);
+      flushListen();
+      saveProgress(currentChunk, el?.currentTime || 0);
     } else {
-      if (audioRef.current?.src && audioRef.current.paused) {
-        audioRef.current.playbackRate = speed;
-        audioRef.current.play();
+      if (el?.src && el.paused && el.currentTime > 0) {
+        el.playbackRate = speed;
+        el.play();
         setIsPlaying(true);
       } else {
         playChunk(currentChunk);
@@ -347,10 +520,11 @@ export default function App() {
     }
     setPregenProgress(null);
     setAudioUrls({});
+    audioUrlsRef.current = {};
   };
 
   const handleDownload = async () => {
-    if (!activeBook) return;
+    if (!activeBook || !supabase) return;
     setLoadingMsg("Preparing download…");
     setIsLoading(true);
     try {
@@ -379,32 +553,49 @@ export default function App() {
   };
 
   const handleSkip = (seconds) => {
-    if (!audioRef.current) return;
-    audioRef.current.currentTime = Math.max(0, Math.min(audioRef.current.duration || 0, audioRef.current.currentTime + seconds));
+    const el = getActive();
+    if (!el) return;
+    el.currentTime = Math.max(0, Math.min(el.duration || 0, el.currentTime + seconds));
   };
 
-  const handleEnded = useCallback(() => {
-    if (currentChunk < chunks.length - 1) {
-      playChunk(currentChunk + 1);
-    } else {
-      setIsPlaying(false);
-      setCurrentChunk(0);
-      setProgress(100);
-      saveProgress(0, 0);
-    }
-  }, [currentChunk, chunks.length, playChunk, saveProgress]);
+  const handleEnded = (e) => {
+    if (e.currentTarget !== getActive()) return; // ignore the idle (preload) element
+    advanceOrFinish();
+  };
 
-  const handleTimeUpdate = () => {
-    if (!audioRef.current) return;
-    const pos = audioRef.current.currentTime;
-    const dur = audioRef.current.duration || 0;
+  const handleTimeUpdate = (e) => {
+    const el = getActive();
+    if (e.currentTarget !== el || !el) return;
+    const pos = el.currentTime;
+    const dur = el.duration || 0;
     setCurrentTime(pos);
     setDuration(dur);
     const chunkProgress = dur ? pos / dur : 0;
     const overall = ((currentChunk + chunkProgress) / (chunks.length || 1)) * 100;
     setProgress(overall);
+
+    // Accumulate listening time (guard against seeks / chunk resets).
+    const delta = pos - lastPosRef.current;
+    if (delta > 0 && delta < 2) listenAccumRef.current += delta;
+    lastPosRef.current = pos;
+    if (listenAccumRef.current >= 30) flushListen();
+
     clearTimeout(progressSaveRef.current);
-    progressSaveRef.current = setTimeout(() => saveProgress(currentChunk, pos), 10000);
+    progressSaveRef.current = setTimeout(() => saveProgress(currentChunkRef.current, pos), 10000);
+  };
+
+  const handleLoadedMeta = (e) => {
+    if (e.currentTarget === getActive()) setDuration(getActive()?.duration || 0);
+  };
+
+  const leavePlayer = () => {
+    getActive()?.pause();
+    getIdle()?.pause();
+    setIsPlaying(false);
+    flushListen();
+    saveProgress(currentChunk, getActive()?.currentTime || 0);
+    fetchBooks();
+    setScreen("library");
   };
 
   const deleteBook = async (e, bookId, filePath) => {
@@ -428,6 +619,66 @@ export default function App() {
   const allCached = chunks.length > 0 && cachedCount >= chunks.length;
   const wordCount = activeBook?.word_count || 0;
   const estMinutes = Math.round(wordCount / 150);
+
+  // ---- Derived library data --------------------------------------------------
+  const categories = [...new Set(books.map(b => b.category).filter(Boolean))].sort();
+  const isFinished = (b) => !!b.completed_at || (b.times_completed || 0) > 0;
+  const bookProgressPct = (b) => b.chunk_count ? Math.round(((b.reading_progress?.[0]?.current_chunk || 0) / b.chunk_count) * 100) : 0;
+  const filteredBooks = books.filter(b => {
+    const q = search.trim().toLowerCase();
+    const matchesQ = !q || b.title?.toLowerCase().includes(q) || b.author?.toLowerCase().includes(q);
+    const matchesCat = !activeCategory || b.category === activeCategory;
+    return matchesQ && matchesCat;
+  });
+  const shelves = [
+    { key: "in", label: "In progress", items: filteredBooks.filter(b => !isFinished(b) && (b.reading_progress?.[0]?.current_chunk || 0) > 0) },
+    { key: "new", label: "Not started", items: filteredBooks.filter(b => !isFinished(b) && (b.reading_progress?.[0]?.current_chunk || 0) === 0) },
+    { key: "done", label: "Finished", items: filteredBooks.filter(isFinished) },
+  ].filter(s => s.items.length > 0);
+
+  const renderNav = () => (
+    <div style={{ display: "flex", justifyContent: "center", gap: 6, marginBottom: "1.5rem" }}>
+      {[{ k: "library", l: "Library" }, { k: "goals", l: "Goals" }, { k: "stats", l: "Stats" }].map(t => (
+        <button key={t.k} className={`speed-btn ${screen === t.k ? "active" : ""}`} onClick={() => setScreen(t.k)} style={{ fontSize: 11, padding: "6px 16px" }}>
+          {t.l}
+        </button>
+      ))}
+    </div>
+  );
+
+  const renderBookCard = (book) => {
+    const prog = book.reading_progress?.[0];
+    const pct = bookProgressPct(book);
+    const lastOpened = prog?.last_opened ? new Date(prog.last_opened).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : null;
+    const finished = isFinished(book);
+    return (
+      <div key={book.id} className="book-card fade-up" onClick={() => openBook(book)}>
+        <button className="delete-btn" onClick={e => deleteBook(e, book.id, book.file_path)}>✕</button>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+          <div style={{ flex: 1, paddingRight: 24 }}>
+            <p style={{ fontSize: "1rem", fontWeight: 600, color: "#e8e0d0", lineHeight: 1.3, marginBottom: 4 }}>{book.title}</p>
+            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555" }}>
+              {book.author ? `${book.author} · ` : ""}{book.word_count?.toLocaleString()} words · ~{Math.round((book.word_count || 0) / 150)} min
+              {lastOpened && ` · ${lastOpened}`}
+            </p>
+            {book.category && <span style={{ display: "inline-block", marginTop: 6, fontFamily: "'Space Mono', monospace", fontSize: 9, color: "#c8a96e", border: "0.5px solid rgba(200,169,110,0.3)", borderRadius: 4, padding: "2px 8px" }}>{book.category}</span>}
+          </div>
+          <div style={{ textAlign: "right", flexShrink: 0 }}>
+            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 12, color: pct > 0 ? "#c8a96e" : "#444" }}>{finished ? "✓" : `${pct}%`}</p>
+            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 9, color: "#444", marginTop: 2 }}>{finished ? "complete" : pct === 0 ? "not started" : "in progress"}</p>
+          </div>
+        </div>
+        <div className="progress-bar" style={{ cursor: "default" }}>
+          <div className="progress-fill" style={{ width: `${finished ? 100 : pct}%`, transition: "none" }} />
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 10 }} onClick={e => e.stopPropagation()}>
+          <button className="btn-ghost" onClick={() => openBook(book, null, true)} style={{ fontSize: 10 }}>↺ Repeat</button>
+          <button className="btn-ghost" onClick={() => { setActiveBook(book); activeBookRef.current = book; setScreen("journal"); }} style={{ fontSize: 10 }}>✎ Journal</button>
+          <button className="btn-ghost" onClick={e => handleEditMeta(e, book)} style={{ fontSize: 10 }}>Edit</button>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: "#0d0d0d", fontFamily: "'Crimson Pro', Georgia, serif", position: "relative", overflow: "hidden" }}>
@@ -477,83 +728,158 @@ export default function App() {
         .voice-dropdown::-webkit-scrollbar-track { background: transparent; }
         .voice-dropdown::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
         .confirm-box { background: rgba(200,169,110,0.05); border: 0.5px solid rgba(200,169,110,0.2); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+        .lib-input { width: 100%; background: #141414; border: 0.5px solid #2a2a2a; border-radius: 8px; color: #e8e0d0; font-family: 'Crimson Pro', serif; font-size: 15px; padding: 10px 12px; outline: none; }
+        .lib-input:focus { border-color: #c8a96e; }
+        .chip { background: transparent; border: 0.5px solid #2e2e2e; border-radius: 20px; color: #888; cursor: pointer; font-family: 'Space Mono', monospace; font-size: 10px; padding: 5px 12px; transition: all 0.15s; }
+        .chip:hover { border-color: #c8a96e; color: #c8a96e; }
+        .chip.active { border-color: #c8a96e; color: #c8a96e; background: rgba(200,169,110,0.08); }
       `}</style>
 
       <div className="orb" style={{ width: 400, height: 400, background: "rgba(200,169,110,0.05)", top: -100, right: -100 }} />
       <div className="orb" style={{ width: 300, height: 300, background: "rgba(100,60,20,0.07)", bottom: -80, left: -80 }} />
-      <audio ref={audioRef} onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} onLoadedMetadata={() => setDuration(audioRef.current?.duration || 0)} />
+      <audio ref={audioRef0} onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} onLoadedMetadata={handleLoadedMeta} />
+      <audio ref={audioRef1} onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} onLoadedMetadata={handleLoadedMeta} />
+
+      {/* Global config error banner */}
+      {supabaseConfigError && (
+        <div style={{ maxWidth: 600, margin: "0 auto", padding: "1rem", position: "relative", zIndex: 1 }}>
+          <div style={{ background: "rgba(200,60,60,0.08)", border: "0.5px solid rgba(200,60,60,0.25)", borderRadius: 8, padding: "12px 16px" }}>
+            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 12, color: "#e06060" }}>⚠ {supabaseConfigError}</p>
+          </div>
+        </div>
+      )}
 
       {/* LIBRARY */}
       {screen === "library" && (
         <div style={{ maxWidth: 600, margin: "0 auto", padding: "2rem 1rem", position: "relative", zIndex: 1 }}>
-          <div style={{ marginBottom: "2rem" }}>
+          <div style={{ marginBottom: "1.5rem" }}>
             <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: "0.25em", color: "#c8a96e", textTransform: "uppercase", marginBottom: 6 }}>PDF Audiobook</p>
             <h1 style={{ fontSize: "clamp(1.6rem, 5vw, 2.2rem)", fontWeight: 300, color: "#e8e0d0", lineHeight: 1.2 }}>Your Library</h1>
           </div>
 
-          <div className={`drop-zone ${dragOver ? "active" : ""}`} style={{ marginBottom: "1.5rem" }}
-            onClick={() => fileInputRef.current?.click()}
-            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={e => { e.preventDefault(); setDragOver(false); handleFileUpload(e.dataTransfer.files[0]); }}>
-            <input ref={fileInputRef} type="file" accept=".pdf" style={{ display: "none" }} onChange={e => handleFileUpload(e.target.files[0])} />
-            {uploading ? (
-              <div>
-                <div style={{ width: 24, height: 24, border: "2px solid #c8a96e", borderTopColor: "transparent", borderRadius: "50%", margin: "0 auto 10px", animation: "spin 0.8s linear infinite" }} />
-                <p style={{ color: "#888", fontSize: 13, animation: "pulse 1.5s ease infinite" }}>{loadingMsg}</p>
+          {renderNav()}
+
+          {/* datalists for author/category autocomplete */}
+          <datalist id="authors-list">{[...new Set(books.map(b => b.author).filter(Boolean))].map(a => <option key={a} value={a} />)}</datalist>
+          <datalist id="categories-list">{categories.map(c => <option key={c} value={c} />)}</datalist>
+
+          {/* Upload / details form */}
+          {pendingUpload ? (
+            <div className="card fade-up" style={{ marginBottom: "1.5rem" }}>
+              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#c8a96e", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 12 }}>Book details</p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <input className="lib-input" placeholder="Title" value={pendingUpload.title} onChange={e => setPendingUpload(p => ({ ...p, title: e.target.value }))} />
+                <input className="lib-input" list="authors-list" placeholder="Author (optional)" value={pendingUpload.author} onChange={e => setPendingUpload(p => ({ ...p, author: e.target.value }))} />
+                <input className="lib-input" list="categories-list" placeholder="Category (optional)" value={pendingUpload.category} onChange={e => setPendingUpload(p => ({ ...p, category: e.target.value }))} />
               </div>
-            ) : (
-              <>
-                <div style={{ fontSize: 28, marginBottom: 8 }}>📚</div>
-                <p style={{ color: "#888", fontSize: 14, marginBottom: 4 }}>Add a book to your library</p>
-                <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#444" }}>drop PDF here or click to browse</p>
-              </>
-            )}
-          </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button className="btn-ghost" onClick={() => setPendingUpload(null)} disabled={uploading} style={{ flex: 1, justifyContent: "center" }}>Cancel</button>
+                <button className="btn-icon" onClick={handleConfirmUpload} disabled={uploading} style={{ flex: 1, justifyContent: "center", borderColor: "#c8a96e", color: "#c8a96e" }}>
+                  {uploading ? "Adding…" : "Add to library"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className={`drop-zone ${dragOver ? "active" : ""}`} style={{ marginBottom: "1.5rem" }}
+              onClick={() => fileInputRef.current?.click()}
+              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={e => { e.preventDefault(); setDragOver(false); handleFilePick(e.dataTransfer.files[0]); }}>
+              <input ref={fileInputRef} type="file" accept=".pdf" style={{ display: "none" }} onChange={e => handleFilePick(e.target.files[0])} />
+              {uploading ? (
+                <div>
+                  <div style={{ width: 24, height: 24, border: "2px solid #c8a96e", borderTopColor: "transparent", borderRadius: "50%", margin: "0 auto 10px", animation: "spin 0.8s linear infinite" }} />
+                  <p style={{ color: "#888", fontSize: 13, animation: "pulse 1.5s ease infinite" }}>{loadingMsg}</p>
+                </div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 28, marginBottom: 8 }}>📚</div>
+                  <p style={{ color: "#888", fontSize: 14, marginBottom: 4 }}>Add a book to your library</p>
+                  <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#444" }}>drop PDF here or click to browse</p>
+                </>
+              )}
+            </div>
+          )}
 
           {error && <div style={{ background: "rgba(200,60,60,0.08)", border: "0.5px solid rgba(200,60,60,0.25)", borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}><p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#e06060" }}>⚠ {error}</p></div>}
+          {booksError && <div style={{ background: "rgba(200,60,60,0.08)", border: "0.5px solid rgba(200,60,60,0.25)", borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}><p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#e06060" }}>⚠ Couldn't load your library: {booksError}</p></div>}
+
+          {/* Recently finished strip */}
+          {recentDone.length > 0 && (
+            <div style={{ marginBottom: "1.25rem" }}>
+              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 8 }}>Recently finished</p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {recentDone.map(rc => (
+                  <div key={rc.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: "#141414", border: "0.5px solid #2a2a2a", borderRadius: 8 }}>
+                    <span style={{ color: "#c8a96e", fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>✓ {rc.books?.title || "Untitled"}</span>
+                    <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", flexShrink: 0, marginLeft: 10 }}>{new Date(rc.completed_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Search + category filter */}
+          {books.length > 0 && (
+            <div style={{ marginBottom: "1.25rem" }}>
+              <input className="lib-input" placeholder="Search by title or author…" value={search} onChange={e => setSearch(e.target.value)} style={{ marginBottom: categories.length ? 10 : 0 }} />
+              {categories.length > 0 && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button className={`chip ${!activeCategory ? "active" : ""}`} onClick={() => setActiveCategory("")}>All</button>
+                  {categories.map(c => (
+                    <button key={c} className={`chip ${activeCategory === c ? "active" : ""}`} onClick={() => setActiveCategory(c)}>{c}</button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {loadingBooks ? (
             <div style={{ textAlign: "center", padding: "2rem" }}><div style={{ width: 24, height: 24, border: "2px solid #c8a96e", borderTopColor: "transparent", borderRadius: "50%", margin: "0 auto", animation: "spin 0.8s linear infinite" }} /></div>
           ) : books.length === 0 ? (
             <div style={{ textAlign: "center", padding: "3rem 1rem" }}><p style={{ color: "#333", fontSize: 14, fontFamily: "'Space Mono', monospace" }}>No books yet — upload your first PDF above</p></div>
+          ) : filteredBooks.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "2rem 1rem" }}><p style={{ color: "#333", fontSize: 14, fontFamily: "'Space Mono', monospace" }}>No books match your search</p></div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {books.map(book => {
-                const prog = book.reading_progress?.[0];
-                const pct = book.chunk_count ? Math.round(((prog?.current_chunk || 0) / book.chunk_count) * 100) : 0;
-                const lastOpened = prog?.last_opened ? new Date(prog.last_opened).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : null;
-                return (
-                  <div key={book.id} className="book-card fade-up" onClick={() => openBook(book)}>
-                    <button className="delete-btn" onClick={e => deleteBook(e, book.id, book.file_path)}>✕</button>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-                      <div style={{ flex: 1, paddingRight: 24 }}>
-                        <p style={{ fontSize: "1rem", fontWeight: 600, color: "#e8e0d0", lineHeight: 1.3, marginBottom: 4 }}>{book.title}</p>
-                        <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555" }}>
-                          {book.word_count?.toLocaleString()} words · ~{Math.round((book.word_count || 0) / 150)} min
-                          {lastOpened && ` · Last read ${lastOpened}`}
-                        </p>
-                      </div>
-                      <div style={{ textAlign: "right", flexShrink: 0 }}>
-                        <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 12, color: pct > 0 ? "#c8a96e" : "#444" }}>{pct}%</p>
-                        <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 9, color: "#444", marginTop: 2 }}>{pct === 0 ? "not started" : pct === 100 ? "complete" : "in progress"}</p>
-                      </div>
-                    </div>
-                    <div className="progress-bar" style={{ cursor: "default" }}>
-                      <div className="progress-fill" style={{ width: `${pct}%`, transition: "none" }} />
-                    </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              {shelves.map(shelf => (
+                <div key={shelf.key}>
+                  <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 10 }}>{shelf.label} · {shelf.items.length}</p>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {shelf.items.map(renderBookCard)}
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           )}
         </div>
       )}
 
+      {/* GOALS */}
+      {screen === "goals" && (
+        <div style={{ maxWidth: 600, margin: "0 auto", padding: "2rem 1rem 0", position: "relative", zIndex: 1 }}>
+          {renderNav()}
+          <Goals />
+        </div>
+      )}
+
+      {/* STATS / WRAPPED */}
+      {screen === "stats" && (
+        <div style={{ maxWidth: 600, margin: "0 auto", padding: "2rem 1rem 0", position: "relative", zIndex: 1 }}>
+          {renderNav()}
+          <Wrapped />
+        </div>
+      )}
+
+      {/* JOURNAL */}
+      {screen === "journal" && activeBook && (
+        <Journal book={activeBook} onBack={() => setScreen("library")} />
+      )}
+
       {/* PLAYER */}
       {screen === "player" && (
         <div style={{ maxWidth: 520, margin: "0 auto", padding: "2rem 1rem", position: "relative", zIndex: 1 }}>
-          <button className="btn-icon" onClick={() => { setScreen("library"); setIsPlaying(false); audioRef.current?.pause(); saveProgress(currentChunk, audioRef.current?.currentTime || 0); fetchBooks(); }} style={{ marginBottom: "1.5rem" }}>
+          <button className="btn-icon" onClick={leavePlayer} style={{ marginBottom: "1.5rem" }}>
             ← Library
           </button>
 
@@ -561,10 +887,23 @@ export default function App() {
             <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: "0.2em", color: "#c8a96e", textTransform: "uppercase", marginBottom: 6 }}>Now playing</p>
             <h2 style={{ fontSize: "clamp(1.2rem, 4vw, 1.6rem)", fontWeight: 300, color: "#e8e0d0", lineHeight: 1.3 }}>{activeBook?.title}</h2>
             <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", marginTop: 4 }}>
-              {wordCount.toLocaleString()} words · ~{estMinutes} min · {chunks.length} parts
+              {activeBook?.author ? `${activeBook.author} · ` : ""}{wordCount.toLocaleString()} words · ~{estMinutes} min · {chunks.length} parts
               {cachedCount > 0 && <span style={{ color: allCached ? "#4ab464" : "#c8a96e" }}> · {cachedCount}/{chunks.length} cached</span>}
             </p>
           </div>
+
+          {/* Completion CTA */}
+          {justFinished && (
+            <div className="confirm-box">
+              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#c8a96e", marginBottom: 8 }}>
+                🎉 You finished <strong>{activeBook?.title}</strong>! Capture your takeaways while they're fresh.
+              </p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn-ghost" onClick={() => setJustFinished(false)} style={{ flex: 1 }}>Later</button>
+                <button className="btn-icon" onClick={() => setScreen("journal")} style={{ flex: 1, borderColor: "#c8a96e", color: "#c8a96e" }}>Write journal</button>
+              </div>
+            </div>
+          )}
 
           {/* Voice selector */}
           <div style={{ marginBottom: 12, position: "relative" }} ref={dropdownRef}>
@@ -584,7 +923,7 @@ export default function App() {
               <div className="voice-dropdown">
                 {VOICE_OPTIONS.map(v => (
                   <div key={v.id} className={`voice-option ${selectedVoice.id === v.id ? "active" : ""}`}
-                    onClick={() => { setSelectedVoice(v); setShowVoiceDropdown(false); setIsPlaying(false); audioRef.current?.pause(); }}>
+                    onClick={() => { setSelectedVoice(v); setShowVoiceDropdown(false); setIsPlaying(false); getActive()?.pause(); getIdle()?.pause(); }}>
                     <p style={{ fontSize: 14, color: "#e8e0d0", fontFamily: "'Crimson Pro', serif", marginBottom: 2 }}>{v.label}</p>
                     <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#666" }}>{v.desc} · {v.lang}</p>
                   </div>
@@ -608,9 +947,10 @@ export default function App() {
             {/* Time scrubber */}
             <div style={{ marginBottom: "1.25rem" }}>
               <div className="progress-bar" onClick={e => {
-                if (!audioRef.current || !duration) return;
+                const el = getActive();
+                if (!el || !duration) return;
                 const rect = e.currentTarget.getBoundingClientRect();
-                audioRef.current.currentTime = ((e.clientX - rect.left) / rect.width) * duration;
+                el.currentTime = ((e.clientX - rect.left) / rect.width) * duration;
               }}>
                 <div className="progress-fill" style={{ width: `${duration ? (currentTime / duration) * 100 : 0}%` }} />
               </div>
@@ -637,7 +977,7 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
               <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#444", marginRight: 4 }}>SPEED</span>
               {[0.75, 1, 1.25, 1.5, 1.75].map(s => (
-                <button key={s} className={`speed-btn ${speed === s ? "active" : ""}`} onClick={() => { setSpeed(s); if (audioRef.current) audioRef.current.playbackRate = s; }}>{s}×</button>
+                <button key={s} className={`speed-btn ${speed === s ? "active" : ""}`} onClick={() => { setSpeed(s); if (audioRef0.current) audioRef0.current.playbackRate = s; if (audioRef1.current) audioRef1.current.playbackRate = s; }}>{s}×</button>
               ))}
             </div>
 
@@ -667,15 +1007,28 @@ export default function App() {
             <button className="btn-danger" onClick={() => setShowRegenConfirm(true)} disabled={!!pregenProgress} style={{ fontSize: 10 }}>
               ↺ Regenerate voice
             </button>
+            <button className="btn-icon" onClick={handleMarkFinished} style={{ fontSize: 10, borderColor: "#3a5a3a", color: "#4ab464" }}>
+              ✓ Mark finished
+            </button>
+            <button className="btn-icon" onClick={() => setScreen("journal")} style={{ fontSize: 10 }}>
+              ✎ Journal
+            </button>
             <button className="btn-icon" onClick={handleDownload} disabled={isLoading || cachedCount === 0} style={{ gridColumn: "1 / -1", fontSize: 10 }}>
               ↓ Download as MP3 ({selectedVoice.label})
             </button>
           </div>
 
+          {/* Pre-generate hint for long drives */}
+          {!allCached && chunks.length > 1 && (
+            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 9, color: "#c8a96e", textAlign: "center", marginBottom: 8 }}>
+              Driving? Tap ⚡ Pre-generate first for uninterrupted playback.
+            </p>
+          )}
+
           {error && <div style={{ background: "rgba(200,60,60,0.08)", border: "0.5px solid rgba(200,60,60,0.25)", borderRadius: 8, padding: "10px 14px", marginBottom: 12 }}><p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#e06060" }}>⚠ {error}</p></div>}
 
           <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 9, color: "#2a2a2a", textAlign: "center", marginTop: 8 }}>
-            Audio cached per voice · Progress auto-saved
+            Gapless playback · Audio cached per voice · Progress auto-saved
           </p>
         </div>
       )}
