@@ -40,10 +40,10 @@ export default function Karaoke({ text, currentTime, duration, isPlaying }) {
       onMouseEnter={() => setAuto(false)}
       onMouseLeave={() => setAuto(true)}
       style={{
-        maxHeight: 260, overflowY: "auto", padding: "8px 2px",
-        maskImage: "linear-gradient(180deg, transparent, #000 14%, #000 86%, transparent)",
-        WebkitMaskImage: "linear-gradient(180deg, transparent, #000 14%, #000 86%, transparent)",
-        lineHeight: 1.9, fontSize: 20, fontWeight: 700, letterSpacing: "-0.01em",
+        maxHeight: 400, overflowY: "auto", padding: "20px 4px",
+        maskImage: "linear-gradient(180deg, transparent, #000 16%, #000 84%, transparent)",
+        WebkitMaskImage: "linear-gradient(180deg, transparent, #000 16%, #000 84%, transparent)",
+        lineHeight: 1.65, fontSize: "clamp(26px, 6.5vw, 34px)", fontWeight: 800, letterSpacing: "-0.02em",
       }}
     >
       {words.map((word, i) => {
@@ -54,11 +54,10 @@ export default function Karaoke({ text, currentTime, duration, isPlaying }) {
             ref={i === active ? activeRef : null}
             animate={{
               color: state === "active" ? "var(--brand)" : state === "past" ? "var(--text-2)" : "var(--text-3)",
-              scale: state === "active" ? 1.06 : 1,
-              opacity: state === "future" ? 0.5 : 1,
+              opacity: state === "future" ? 0.38 : state === "past" ? 0.75 : 1,
             }}
             transition={{ duration: 0.18 }}
-            style={{ display: "inline-block", marginRight: "0.32em", transformOrigin: "left center", textShadow: state === "active" && isPlaying ? "0 0 18px rgba(29,185,84,0.5)" : "none" }}
+            style={{ display: "inline-block", marginRight: "0.3em", textShadow: state === "active" && isPlaying ? "0 0 24px rgba(29,185,84,0.55)" : "none" }}
           >
             {word}
           </motion.span>

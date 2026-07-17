@@ -97,12 +97,26 @@ export default function Library({
         {pendingUpload ? (
           <motion.div key="form" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={spring}>
             <Card style={{ marginBottom: 24 }}>
-              <p style={{ fontSize: 12, fontWeight: 700, color: "var(--brand)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 14 }}>Book details</p>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <input className="field" placeholder="Display title" value={pendingUpload.title} onChange={e => setPendingUpload(p => ({ ...p, title: e.target.value }))} />
-                <input className="field" list="authors-list" placeholder="Author (optional)" value={pendingUpload.author} onChange={e => setPendingUpload(p => ({ ...p, author: e.target.value }))} />
-                <input className="field" list="categories-list" placeholder="Category (optional)" value={pendingUpload.category} onChange={e => setPendingUpload(p => ({ ...p, category: e.target.value }))} />
+              <p style={{ fontSize: 12, fontWeight: 700, color: "var(--brand)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Customize book</p>
+              <p style={{ fontSize: 12, color: "var(--text-3)", marginBottom: 14 }}>Rename it, set author &amp; category, and add a cover.</p>
+              <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+                <label style={{ cursor: "pointer", position: "relative", flexShrink: 0 }}>
+                  <input type="file" accept="image/*" style={{ display: "none" }}
+                    onChange={e => { const f = e.target.files[0]; if (f) setPendingUpload(p => ({ ...p, coverFile: f, coverPreview: URL.createObjectURL(f) })); }} />
+                  {pendingUpload.coverPreview ? (
+                    <img src={pendingUpload.coverPreview} alt="" style={{ width: 76, height: 76, borderRadius: 12, objectFit: "cover" }} />
+                  ) : (
+                    <div style={{ width: 76, height: 76, borderRadius: 12, background: "var(--surface-2)", border: "1px dashed var(--border-hi)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, color: "var(--text-3)" }}>
+                      <ImagePlus size={18} /><span style={{ fontSize: 9 }}>Cover</span>
+                    </div>
+                  )}
+                </label>
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
+                  <input className="field" placeholder="Display title" value={pendingUpload.title} onChange={e => setPendingUpload(p => ({ ...p, title: e.target.value }))} />
+                  <input className="field" list="authors-list" placeholder="Author (optional)" value={pendingUpload.author} onChange={e => setPendingUpload(p => ({ ...p, author: e.target.value }))} />
+                </div>
               </div>
+              <input className="field" list="categories-list" placeholder="Category (optional)" value={pendingUpload.category} onChange={e => setPendingUpload(p => ({ ...p, category: e.target.value }))} style={{ marginTop: 10 }} />
               <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                 <Button variant="ghost" full onClick={() => setPendingUpload(null)} disabled={uploading}>Cancel</Button>
                 <Button variant="primary" full onClick={onConfirmUpload} disabled={uploading}>
@@ -113,11 +127,12 @@ export default function Library({
           </motion.div>
         ) : (
           <motion.label key="drop" htmlFor="pdf-input"
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1, borderColor: dragOver ? "var(--brand)" : "var(--border)", scale: dragOver ? 1.01 : 1 }}
+            exit={{ opacity: 0 }}
             onDragOver={e => { e.preventDefault(); setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
             onDrop={e => { e.preventDefault(); setDragOver(false); onFilePick(e.dataTransfer.files[0]); }}
-            animate={{ borderColor: dragOver ? "var(--brand)" : "var(--border)", scale: dragOver ? 1.01 : 1 }}
             transition={spring}
             style={{ display: "block", border: "1.5px dashed var(--border)", borderRadius: "var(--r-lg)", padding: "30px 20px", textAlign: "center", cursor: "pointer", marginBottom: 24, background: dragOver ? "rgba(29,185,84,0.05)" : "var(--surface)" }}>
             <input id="pdf-input" type="file" accept=".pdf" style={{ display: "none" }} onChange={e => onFilePick(e.target.files[0])} />

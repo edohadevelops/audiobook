@@ -255,7 +255,7 @@ export default function App() {
 
   const handleConfirmUpload = async () => {
     if (!pendingUpload || !supabase) return;
-    const { file, text, chunks: c, title, author, category } = pendingUpload;
+    const { file, text, chunks: c, title, author, category, coverFile } = pendingUpload;
     setUploading(true);
     setLoadingMsg("Uploading to library…");
     try {
@@ -274,6 +274,11 @@ export default function App() {
         })
         .select().single();
       if (bookError) throw bookError;
+      // Optional cover chosen during add — upload it now that we have the book id.
+      if (coverFile) {
+        const up = await uploadCover(bookData.id, coverFile);
+        if (!up.error) { await updateBook(bookData.id, { cover_path: up.data }); bookData.cover_path = up.data; }
+      }
       await supabase.from("reading_progress").insert({ book_id: bookData.id, current_chunk: 0, current_position: 0 });
       setPendingUpload(null);
       await fetchBooks();
