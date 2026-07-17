@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   ChevronDown, Play, Pause, SkipBack, SkipForward, Rewind, FastForward,
   Zap, RotateCcw, CheckCircle2, PenLine, Download, Sparkles, BookOpen,
+  Eye, EyeOff, Maximize2, Minimize2,
 } from "lucide-react";
 import {
   fetchBooks as dbFetchBooks,
@@ -162,6 +163,9 @@ export default function App() {
   const [pendingUpload, setPendingUpload] = useState(null);
   // Completion CTA
   const [justFinished, setJustFinished] = useState(false);
+  // Lyrics view
+  const [lyricsHidden, setLyricsHidden] = useState(false);
+  const [lyricsFull, setLyricsFull] = useState(false);
 
   // Two audio elements for gapless (double-buffered) playback.
   const audioRef0 = useRef(null);
@@ -585,6 +589,7 @@ export default function App() {
   const collapsePlayer = () => {
     flushListen();
     saveProgress(currentChunk, getActive()?.currentTime || 0);
+    setLyricsFull(false);
     setScreen("library");
   };
 
@@ -805,13 +810,23 @@ export default function App() {
                 )}
               </AnimatePresence>
 
-              {/* Karaoke */}
-              <Card style={{ marginBottom: 16, padding: 18 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                  <Waveform playing={isPlaying} color="var(--brand)" size={14} />
-                  <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Part {currentChunk + 1} / {chunks.length}</span>
+              {/* Lyrics */}
+              <Card style={{ marginBottom: 16, padding: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: lyricsHidden ? 0 : 8 }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <Waveform playing={isPlaying} color="var(--brand)" size={14} />
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Lyrics · Part {currentChunk + 1} / {chunks.length}</span>
+                  </span>
+                  <span style={{ display: "flex", gap: 6 }}>
+                    <IconButton size={30} onClick={() => setLyricsHidden(h => !h)} title={lyricsHidden ? "Show lyrics" : "Hide lyrics"}>
+                      {lyricsHidden ? <Eye size={15} /> : <EyeOff size={15} />}
+                    </IconButton>
+                    <IconButton size={30} onClick={() => setLyricsFull(true)} title="Fullscreen lyrics"><Maximize2 size={15} /></IconButton>
+                  </span>
                 </div>
-                <Karaoke text={chunks[currentChunk]} currentTime={currentTime} duration={duration} isPlaying={isPlaying} />
+                {!lyricsHidden && (
+                  <Karaoke text={chunks[currentChunk]} currentTime={currentTime} duration={duration} isPlaying={isPlaying} height="40vh" />
+                )}
                 {isLoading && loadingMsg && (
                   <p style={{ fontSize: 11.5, color: "var(--brand)", textAlign: "center", marginTop: 10 }}>{loadingMsg}</p>
                 )}
@@ -917,6 +932,34 @@ export default function App() {
 
               {error && <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: "var(--r-md)", padding: "10px 14px" }}><p style={{ fontSize: 12, color: "var(--error)" }}>{error}</p></div>}
             </div>
+
+            {/* Fullscreen lyrics */}
+            <AnimatePresence>
+              {lyricsFull && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }}
+                  style={{ position: "fixed", inset: 0, zIndex: 80, background: "var(--bg)", display: "flex", flexDirection: "column" }}>
+                  <div style={{ position: "absolute", inset: 0, background: "radial-gradient(120% 60% at 50% 0%, rgba(29,185,84,0.15), transparent 70%)", pointerEvents: "none" }} />
+                  <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 20px" }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.1em" }}>{activeBook?.title} · Part {currentChunk + 1}/{chunks.length}</span>
+                    <IconButton size={38} onClick={() => setLyricsFull(false)} title="Exit fullscreen"><Minimize2 size={18} /></IconButton>
+                  </div>
+                  <div style={{ position: "relative", flex: 1, display: "flex", alignItems: "center", width: "100%", maxWidth: 760, margin: "0 auto", padding: "0 24px" }}>
+                    <Karaoke text={chunks[currentChunk]} currentTime={currentTime} duration={duration} isPlaying={isPlaying} height="64vh" />
+                  </div>
+                  <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center", gap: 18, padding: "18px 20px 30px" }}>
+                    <IconButton size={44} onClick={() => { if (currentChunk > 0) playChunk(currentChunk - 1); }} disabled={currentChunk === 0}><SkipBack size={18} fill="currentColor" /></IconButton>
+                    <IconButton size={44} onClick={() => handleSkip(-10)}><Rewind size={18} /></IconButton>
+                    <motion.button whileTap={tap} onClick={handlePlay} disabled={isLoading}
+                      style={{ width: 68, height: 68, borderRadius: "50%", border: "none", background: "var(--brand)", color: "var(--brand-contrast)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "var(--shadow)", animation: isPlaying && !isLoading ? "glowPulse 2.4s ease-in-out infinite" : "none" }}>
+                      {isLoading ? <span style={{ width: 20, height: 20, border: "2px solid var(--brand-contrast)", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                        : isPlaying ? <Pause size={26} fill="currentColor" /> : <Play size={26} fill="currentColor" style={{ marginLeft: 3 }} />}
+                    </motion.button>
+                    <IconButton size={44} onClick={() => handleSkip(10)}><FastForward size={18} /></IconButton>
+                    <IconButton size={44} onClick={() => { if (currentChunk < chunks.length - 1) playChunk(currentChunk + 1); }} disabled={currentChunk === chunks.length - 1}><SkipForward size={18} fill="currentColor" /></IconButton>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </motion.div>
         )}
       </AnimatePresence>
