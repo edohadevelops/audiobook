@@ -1,5 +1,9 @@
 import { useState, useEffect } from "react";
+import { motion } from "framer-motion";
+import { Trophy, Check, Pencil, TrendingUp } from "lucide-react";
 import { getGoal, setGoal, countCompletionsInYear } from "../lib/db";
+import { Card, Button, Spinner } from "../components/ui";
+import { ease } from "../theme";
 
 export default function Goals() {
   const year = new Date().getFullYear();
@@ -34,70 +38,70 @@ export default function Goals() {
 
   const pct = target ? Math.min(100, Math.round((finished / target) * 100)) : 0;
   const remaining = Math.max(0, target - finished);
-
-  // Pace: how many "should" be done by now if spread evenly across the year.
   const now = new Date();
   const dayOfYear = Math.floor((now - new Date(year, 0, 0)) / 86400000);
   const expected = Math.round((dayOfYear / 365) * target);
   const onTrack = finished >= expected;
+  const reached = finished >= target;
 
-  // Ring geometry
   const R = 70, C = 2 * Math.PI * R;
 
   return (
-    <div style={{ maxWidth: 520, margin: "0 auto", padding: "2rem 1rem", position: "relative", zIndex: 1 }}>
-      <div style={{ marginBottom: "1.5rem" }}>
-        <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: "0.2em", color: "#c8a96e", textTransform: "uppercase", marginBottom: 6 }}>Reading goal</p>
-        <h2 style={{ fontSize: "clamp(1.4rem, 5vw, 2rem)", fontWeight: 300, color: "#e8e0d0", lineHeight: 1.2 }}>{year}</h2>
-      </div>
+    <div style={{ maxWidth: 520, margin: "0 auto", padding: "8px 16px 120px", position: "relative", zIndex: 1 }}>
+      <motion.h1 initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease }}
+        className="grad-text" style={{ fontSize: "clamp(2rem, 7vw, 2.6rem)", marginBottom: 2 }}>
+        Reading Goal
+      </motion.h1>
+      <p style={{ color: "var(--text-3)", fontSize: 13, marginBottom: 24 }}>{year}</p>
 
       {loading ? (
-        <div style={{ textAlign: "center", padding: "3rem" }}>
-          <div style={{ width: 24, height: 24, border: "2px solid #c8a96e", borderTopColor: "transparent", borderRadius: "50%", margin: "0 auto", animation: "spin 0.8s linear infinite" }} />
-        </div>
+        <div style={{ display: "flex", justifyContent: "center", padding: "3rem" }}><Spinner /></div>
       ) : (
         <>
-          <div className="card" style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 12 }}>
+          <Card style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 12 }}>
             <div style={{ position: "relative", width: 180, height: 180 }}>
               <svg width="180" height="180" style={{ transform: "rotate(-90deg)" }}>
-                <circle cx="90" cy="90" r={R} fill="none" stroke="#1e1e1e" strokeWidth="10" />
-                <circle cx="90" cy="90" r={R} fill="none" stroke="#c8a96e" strokeWidth="10" strokeLinecap="round"
-                  strokeDasharray={C} strokeDashoffset={C - (pct / 100) * C} style={{ transition: "stroke-dashoffset 0.6s ease" }} />
+                <circle cx="90" cy="90" r={R} fill="none" stroke="var(--surface-hi)" strokeWidth="12" />
+                <motion.circle cx="90" cy="90" r={R} fill="none" stroke={reached ? "var(--success)" : "var(--brand)"} strokeWidth="12" strokeLinecap="round"
+                  strokeDasharray={C} initial={{ strokeDashoffset: C }} animate={{ strokeDashoffset: C - (pct / 100) * C }}
+                  transition={{ duration: 1, ease }} />
               </svg>
               <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-                <span style={{ fontSize: 42, fontWeight: 300, color: "#e8e0d0", lineHeight: 1 }}>{finished}</span>
-                <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#555", marginTop: 4 }}>of {target}</span>
+                <motion.span initial={{ scale: 0.6, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ delay: 0.2, type: "spring", stiffness: 300, damping: 18 }}
+                  style={{ fontSize: 48, fontWeight: 800, color: "var(--text)", lineHeight: 1 }}>{finished}</motion.span>
+                <span style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>of {target}</span>
               </div>
             </div>
 
-            <div style={{ marginTop: 16, textAlign: "center" }}>
-              {finished >= target ? (
-                <p style={{ color: "#4ab464", fontSize: 14 }}>🎉 Goal reached — {finished} books this year!</p>
+            <div style={{ marginTop: 18, textAlign: "center" }}>
+              {reached ? (
+                <p style={{ color: "var(--success)", fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 8, justifyContent: "center" }}>
+                  <Trophy size={18} /> Goal reached — {finished} books this year!
+                </p>
               ) : (
                 <>
-                  <p style={{ color: "#e8e0d0", fontSize: 15 }}>{remaining} book{remaining === 1 ? "" : "s"} to go</p>
-                  <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: onTrack ? "#4ab464" : "#c8a96e", marginTop: 4 }}>
-                    {onTrack ? "✓ On track" : `Behind pace — ~${expected} expected by now`}
+                  <p style={{ color: "var(--text)", fontSize: 16, fontWeight: 600 }}>{remaining} book{remaining === 1 ? "" : "s"} to go</p>
+                  <p style={{ fontSize: 12.5, color: onTrack ? "var(--success)" : "var(--brand)", marginTop: 6, display: "flex", alignItems: "center", gap: 6, justifyContent: "center" }}>
+                    {onTrack ? <><Check size={14} /> On track</> : <><TrendingUp size={14} /> Behind pace — ~{expected} expected by now</>}
                   </p>
                 </>
               )}
             </div>
-          </div>
+          </Card>
 
-          <div className="card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#888" }}>Books per year</span>
+          <Card style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: 16 }}>
+            <span style={{ fontSize: 13, color: "var(--text-2)" }}>Books per year</span>
             {editing ? (
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input type="number" min="1" value={draft} onChange={e => setDraft(e.target.value)}
-                  style={{ width: 64, background: "#0d0d0d", border: "0.5px solid #c8a96e", borderRadius: 6, color: "#e8e0d0", fontFamily: "'Space Mono', monospace", fontSize: 13, padding: "6px 8px", outline: "none" }} />
-                <button className="btn-icon" onClick={saveTarget} style={{ padding: "6px 12px" }}>Save</button>
+                <input className="field" type="number" min="1" value={draft} onChange={e => setDraft(e.target.value)} style={{ width: 72, padding: "8px 10px" }} />
+                <Button variant="primary" size="sm" onClick={saveTarget}><Check size={14} /> Save</Button>
               </div>
             ) : (
-              <button className="btn-ghost" onClick={() => setEditing(true)}>Edit goal ({target})</button>
+              <Button variant="ghost" size="sm" onClick={() => setEditing(true)}><Pencil size={13} /> Edit ({target})</Button>
             )}
-          </div>
+          </Card>
 
-          {error && <div style={{ background: "rgba(200,60,60,0.08)", border: "0.5px solid rgba(200,60,60,0.25)", borderRadius: 8, padding: "10px 14px", marginTop: 12 }}><p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#e06060" }}>⚠ {error}</p></div>}
+          {error && <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: "var(--r-md)", padding: "10px 14px", marginTop: 12 }}><p style={{ fontSize: 12, color: "var(--error)" }}>{error}</p></div>}
         </>
       )}
     </div>

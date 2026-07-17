@@ -1,25 +1,40 @@
 import { useState, useEffect } from "react";
+import { motion } from "framer-motion";
+import { BookCheck, Clock, Users, Tags, TrendingUp } from "lucide-react";
 import { fetchStats } from "../lib/db";
 import { periodRange, summarize, formatDuration, PERIODS } from "../lib/analytics";
+import { Card, Spinner } from "../components/ui";
+import { listContainer, listItem, ease, spring } from "../theme";
 
-function TopList({ title, rows, unit }) {
+function TopList({ title, Icon, rows, unit }) {
   return (
-    <div className="card" style={{ marginBottom: 12 }}>
-      <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#c8a96e", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 10 }}>{title}</p>
+    <Card style={{ marginBottom: 12, padding: 18 }}>
+      <p style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, fontWeight: 700, color: "var(--text-2)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 12 }}>
+        <Icon size={14} color="var(--brand)" /> {title}
+      </p>
       {rows.length === 0 ? (
-        <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#444" }}>No listening data yet</p>
+        <p style={{ fontSize: 12.5, color: "var(--text-3)" }}>No listening data yet</p>
       ) : (
-        rows.slice(0, 5).map((r, i) => (
-          <div key={r.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0", borderBottom: i < Math.min(rows.length, 5) - 1 ? "0.5px solid #1e1e1e" : "none" }}>
-            <span style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-              <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 12, color: "#c8a96e", width: 16 }}>{i + 1}</span>
-              <span style={{ color: "#e8e0d0", fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
-            </span>
-            <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#666", flexShrink: 0, marginLeft: 10 }}>{unit(r)}</span>
-          </div>
-        ))
+        rows.slice(0, 5).map((r, i) => {
+          const max = rows[0].seconds || 1;
+          return (
+            <div key={r.name} style={{ padding: "7px 0" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: "var(--brand)", width: 14 }}>{i + 1}</span>
+                  <span style={{ color: "var(--text)", fontSize: 14, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+                </span>
+                <span style={{ fontSize: 11, color: "var(--text-3)", flexShrink: 0, marginLeft: 10 }}>{unit(r)}</span>
+              </div>
+              <div style={{ height: 4, background: "var(--surface-hi)", borderRadius: 4, overflow: "hidden" }}>
+                <motion.div initial={{ width: 0 }} animate={{ width: `${(r.seconds / max) * 100}%` }} transition={{ ...spring, delay: 0.05 * i }}
+                  style={{ height: "100%", background: "var(--brand)", borderRadius: 4 }} />
+              </div>
+            </div>
+          );
+        })
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -45,45 +60,50 @@ export default function Wrapped() {
   }, [period]);
 
   return (
-    <div style={{ maxWidth: 520, margin: "0 auto", padding: "2rem 1rem", position: "relative", zIndex: 1 }}>
-      <div style={{ marginBottom: "1.25rem" }}>
-        <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: "0.2em", color: "#c8a96e", textTransform: "uppercase", marginBottom: 6 }}>Your Wrapped</p>
-        <h2 style={{ fontSize: "clamp(1.4rem, 5vw, 2rem)", fontWeight: 300, color: "#e8e0d0", lineHeight: 1.2 }}>Listening stats</h2>
-      </div>
+    <div style={{ maxWidth: 520, margin: "0 auto", padding: "8px 16px 120px", position: "relative", zIndex: 1 }}>
+      <motion.h1 initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease }}
+        className="grad-text" style={{ fontSize: "clamp(2rem, 7vw, 2.6rem)", marginBottom: 2 }}>
+        Your Wrapped
+      </motion.h1>
+      <p style={{ color: "var(--text-3)", fontSize: 13, marginBottom: 20 }}>Listening stats</p>
 
       {/* Period tabs */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
-        {PERIODS.map(p => (
-          <button key={p.key} className={`speed-btn ${period === p.key ? "active" : ""}`} onClick={() => setPeriod(p.key)} style={{ fontSize: 11, padding: "6px 12px" }}>
-            {p.label}
-          </button>
-        ))}
+      <div style={{ display: "flex", gap: 6, marginBottom: 18, flexWrap: "wrap" }}>
+        {PERIODS.map(p => {
+          const active = period === p.key;
+          return (
+            <motion.button key={p.key} whileTap={{ scale: 0.94 }} onClick={() => setPeriod(p.key)}
+              style={{ border: "1px solid " + (active ? "var(--brand)" : "var(--border)"), background: active ? "var(--brand)" : "transparent", color: active ? "var(--brand-contrast)" : "var(--text-2)", borderRadius: "var(--r-full)", padding: "7px 15px", fontSize: 12.5, fontWeight: active ? 700 : 500, cursor: "pointer" }}>
+              {p.label}
+            </motion.button>
+          );
+        })}
       </div>
 
       {loading ? (
-        <div style={{ textAlign: "center", padding: "3rem" }}>
-          <div style={{ width: 24, height: 24, border: "2px solid #c8a96e", borderTopColor: "transparent", borderRadius: "50%", margin: "0 auto", animation: "spin 0.8s linear infinite" }} />
-        </div>
+        <div style={{ display: "flex", justifyContent: "center", padding: "3rem" }}><Spinner /></div>
       ) : (
-        <>
-          {/* Headline numbers */}
+        <motion.div variants={listContainer} initial="hidden" animate="show" key={period}>
+          {/* Hero stat panels */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
-            <div className="card" style={{ textAlign: "center" }}>
-              <p style={{ fontSize: 34, fontWeight: 300, color: "#c8a96e", lineHeight: 1 }}>{stats.booksFinished}</p>
-              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", marginTop: 6, textTransform: "uppercase", letterSpacing: "0.1em" }}>Books finished</p>
-            </div>
-            <div className="card" style={{ textAlign: "center" }}>
-              <p style={{ fontSize: 34, fontWeight: 300, color: "#c8a96e", lineHeight: 1 }}>{formatDuration(stats.totalSeconds)}</p>
-              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", marginTop: 6, textTransform: "uppercase", letterSpacing: "0.1em" }}>Time listened</p>
-            </div>
+            <motion.div variants={listItem} style={{ borderRadius: "var(--r-lg)", padding: 20, background: "linear-gradient(150deg, var(--brand), #12833a)", color: "#04120a", boxShadow: "var(--shadow)" }}>
+              <BookCheck size={20} style={{ opacity: 0.85 }} />
+              <p style={{ fontSize: 40, fontWeight: 800, lineHeight: 1, marginTop: 12 }}>{stats.booksFinished}</p>
+              <p style={{ fontSize: 11, fontWeight: 700, marginTop: 6, textTransform: "uppercase", letterSpacing: "0.08em", opacity: 0.8 }}>Books finished</p>
+            </motion.div>
+            <motion.div variants={listItem} style={{ borderRadius: "var(--r-lg)", padding: 20, background: "var(--surface)", border: "1px solid var(--border)", boxShadow: "var(--shadow)" }}>
+              <Clock size={20} color="var(--brand)" />
+              <p style={{ fontSize: 40, fontWeight: 800, lineHeight: 1, marginTop: 12, color: "var(--text)" }}>{formatDuration(stats.totalSeconds)}</p>
+              <p style={{ fontSize: 11, fontWeight: 700, marginTop: 6, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--text-3)" }}>Time listened</p>
+            </motion.div>
           </div>
 
-          <TopList title="Most listened authors" rows={stats.topAuthors} unit={r => formatDuration(r.seconds)} />
-          <TopList title="Most listened categories" rows={stats.topCategories} unit={r => formatDuration(r.seconds)} />
-          <TopList title="Top books" rows={stats.topBooks} unit={r => formatDuration(r.seconds)} />
+          <motion.div variants={listItem}><TopList title="Most listened authors" Icon={Users} rows={stats.topAuthors} unit={r => formatDuration(r.seconds)} /></motion.div>
+          <motion.div variants={listItem}><TopList title="Most listened categories" Icon={Tags} rows={stats.topCategories} unit={r => formatDuration(r.seconds)} /></motion.div>
+          <motion.div variants={listItem}><TopList title="Top books" Icon={TrendingUp} rows={stats.topBooks} unit={r => formatDuration(r.seconds)} /></motion.div>
 
-          {error && <div style={{ background: "rgba(200,60,60,0.08)", border: "0.5px solid rgba(200,60,60,0.25)", borderRadius: 8, padding: "10px 14px" }}><p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#e06060" }}>⚠ {error}</p></div>}
-        </>
+          {error && <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: "var(--r-md)", padding: "10px 14px" }}><p style={{ fontSize: 12, color: "var(--error)" }}>{error}</p></div>}
+        </motion.div>
       )}
     </div>
   );

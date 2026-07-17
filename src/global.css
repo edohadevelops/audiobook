@@ -1,0 +1,140 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+/* =========================================================================
+   Design tokens — brand green + neutral scale + semantics, per theme.
+   Dark is the hero mode; light is a clean off-white.
+   ========================================================================= */
+:root {
+  /* Brand (Spotify-style green) — used for actions, active states, progress. */
+  --brand: #1db954;
+  --brand-hover: #1ed760;
+  --brand-press: #169c46;
+  --brand-contrast: #04120a;
+
+  /* Semantic (kept separate from brand) */
+  --success: #3ecf8e;
+  --error: #ef4444;
+  --warning: #f59e0b;
+
+  /* Spacing scale (4 / 8 / 12 / 16 / 24 / 32) */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-6: 24px; --sp-8: 32px;
+
+  /* Radii + elevation */
+  --r-sm: 8px; --r-md: 12px; --r-lg: 18px; --r-xl: 26px; --r-full: 999px;
+
+  /* Motion (mirrors theme.js) */
+  --dur-fast: 0.15s; --dur-base: 0.28s;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* ---- Dark (hero) ---- */
+:root, [data-theme="dark"] {
+  --bg: #0a0a0c;
+  --bg-2: #101014;
+  --surface: #16161c;
+  --surface-2: #1c1c24;
+  --surface-hi: #24242e;
+  --border: #26262f;
+  --border-hi: #33333f;
+  --text: #f4f4f6;
+  --text-2: #a9a9b6;
+  --text-3: #6c6c78;
+  --shadow: 0 12px 32px -12px rgba(0,0,0,0.7);
+  --shadow-lg: 0 24px 60px -18px rgba(0,0,0,0.8);
+  --glass: rgba(22,22,28,0.72);
+  --star: rgba(255,255,255,0.7);
+  --scrim: rgba(0,0,0,0.6);
+}
+
+/* ---- Light ---- */
+[data-theme="light"] {
+  --bg: #f6f7f5;
+  --bg-2: #eeefed;
+  --surface: #ffffff;
+  --surface-2: #f4f5f3;
+  --surface-hi: #ececee;
+  --border: #e4e5e2;
+  --border-hi: #d5d6d3;
+  --text: #0b0d0a;
+  --text-2: #565a54;
+  --text-3: #8a8e86;
+  --shadow: 0 12px 30px -14px rgba(0,0,0,0.18);
+  --shadow-lg: 0 24px 60px -20px rgba(0,0,0,0.22);
+  --glass: rgba(255,255,255,0.75);
+  --star: rgba(20,20,30,0.35);
+  --scrim: rgba(0,0,0,0.35);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background var(--dur-base) var(--ease), color var(--dur-base) var(--ease);
+}
+
+#root {
+  width: 100%;
+  min-height: 100svh;
+}
+
+h1, h2, h3 { font-weight: 800; letter-spacing: -0.02em; color: var(--text); line-height: 1.1; }
+
+button { font-family: var(--font); }
+
+a { color: var(--brand); }
+
+/* Gradient text helper for hero headings */
+.grad-text {
+  background: linear-gradient(120deg, var(--text) 20%, var(--brand) 120%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: var(--r-full); border: 3px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
+/* Shimmer for skeleton loaders */
+@keyframes shimmer { 100% { transform: translateX(100%); } }
+.skeleton {
+  position: relative; overflow: hidden;
+  background: var(--surface-2); border-radius: var(--r-md);
+}
+.skeleton::after {
+  content: ""; position: absolute; inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--surface-hi), transparent);
+  animation: shimmer 1.4s infinite;
+}
+
+@keyframes twinkle { 0%,100% { opacity: 0.15; } 50% { opacity: 0.9; } }
+@keyframes eq { from { transform: scaleY(0.25); } to { transform: scaleY(1); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes glowPulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(29,185,84,0.45), var(--shadow); }
+  50% { box-shadow: 0 0 0 14px rgba(29,185,84,0), var(--shadow); }
+}
+
+/* Inputs */
+.field {
+  width: 100%; background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  font-size: 15px; padding: 12px 14px; outline: none;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+.field::placeholder { color: var(--text-3); }
+.field:focus { border-color: var(--brand); box-shadow: 0 0 0 4px rgba(29,185,84,0.15); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::after, *::before { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}

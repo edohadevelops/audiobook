@@ -37,6 +37,28 @@ export function updateBookMeta(bookId, { author, category }) {
   );
 }
 
+// Generic update for editable book fields (title, author, category, cover_path).
+export function updateBook(bookId, fields) {
+  return run((sb) => sb.from("books").update(fields).eq("id", bookId));
+}
+
+// Covers live in the public `audio` bucket under covers/. Returns the storage path.
+export async function uploadCover(bookId, file) {
+  const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+  const path = `covers/${bookId}.${ext}`;
+  const up = await run((sb) =>
+    sb.storage.from("audio").upload(path, file, { contentType: file.type, upsert: true })
+  );
+  if (up.error) return up;
+  return { data: path, error: null };
+}
+
+// Public URL for a stored cover path (or null).
+export function coverUrl(path) {
+  if (!path || !supabase) return null;
+  return supabase.storage.from("audio").getPublicUrl(path).data.publicUrl;
+}
+
 // ---- Completions -----------------------------------------------------------
 
 // Records a finished book: one completions row per finish (re-reads add rows),

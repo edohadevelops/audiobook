@@ -1,15 +1,29 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { supabase, supabaseConfigError } from "./supabaseClient";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  ChevronDown, Play, Pause, SkipBack, SkipForward, Rewind, FastForward,
+  Zap, RotateCcw, CheckCircle2, PenLine, Download, Sparkles, BookOpen,
+} from "lucide-react";
 import {
   fetchBooks as dbFetchBooks,
   recordCompletion,
   flushListenSession,
-  updateBookMeta,
+  updateBook,
+  uploadCover,
   fetchRecentCompletions,
+  coverUrl,
 } from "./lib/db";
 import Journal from "./screens/Journal";
 import Goals from "./screens/Goals";
 import Wrapped from "./screens/Wrapped";
+import Library from "./screens/Library";
+import Starfield from "./components/Starfield";
+import MiniPlayer from "./components/MiniPlayer";
+import Karaoke from "./components/Karaoke";
+import Confetti from "./components/Confetti";
+import { TabBar, ThemeToggle, Button, IconButton, Card, Waveform } from "./components/ui";
+import { spring, tap, ease } from "./theme";
 
 const CHUNK_SIZE = 4000;
 
@@ -116,19 +130,6 @@ async function generateAndCacheAudio(text, apiKey, bookId, chunkIndex, voice, fo
   return urlData.publicUrl;
 }
 
-const WaveIcon = ({ playing }) => (
-  <svg width="24" height="24" viewBox="0 0 28 28" fill="none">
-    {[4, 8, 12, 16, 20, 24].map((x, i) => {
-      const heights = playing ? [10, 18, 14, 20, 12, 16] : [4, 4, 4, 4, 4, 4];
-      const h = heights[i];
-      return (
-        <rect key={x} x={x} y={(28 - h) / 2} width="2.5" height={h} rx="1.25" fill="currentColor"
-          style={playing ? { animation: `wave ${0.6 + i * 0.1}s ease-in-out ${i * 0.08}s infinite alternate` } : {}} />
-      );
-    })}
-  </svg>
-);
-
 export default function App() {
   const [screen, setScreen] = useState("library");
   const [apiKey] = useState(import.meta.env.VITE_GOOGLE_TTS_KEY || "");
@@ -146,7 +147,6 @@ export default function App() {
   const [error, setError] = useState("");
   const [progress, setProgress] = useState(0);
   const [speed, setSpeed] = useState(1);
-  const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -172,7 +172,6 @@ export default function App() {
   const getActive = () => audioRefs[activeIdx.current].current;
   const getIdle = () => audioRefs[activeIdx.current === 0 ? 1 : 0].current;
 
-  const fileInputRef = useRef(null);
   const progressSaveRef = useRef(null);
   const dropdownRef = useRef(null);
 
@@ -286,17 +285,6 @@ export default function App() {
       setUploading(false);
       setLoadingMsg("");
     }
-  };
-
-  const handleEditMeta = async (e, book) => {
-    e.stopPropagation();
-    const author = prompt("Author", book.author || "");
-    if (author === null) return;
-    const category = prompt("Category (e.g. Business, Fiction, Self-help)", book.category || "");
-    if (category === null) return;
-    const { error } = await updateBookMeta(book.id, { author: author.trim() || null, category: category.trim() || null });
-    if (error) { setError(error.message); return; }
-    fetchBooks();
   };
 
   // ---- Opening & playback ----------------------------------------------------
@@ -588,14 +576,20 @@ export default function App() {
     if (e.currentTarget === getActive()) setDuration(getActive()?.duration || 0);
   };
 
-  const leavePlayer = () => {
-    getActive()?.pause();
-    getIdle()?.pause();
-    setIsPlaying(false);
+  // Collapse to the mini-player WITHOUT stopping playback (keeps listening).
+  const collapsePlayer = () => {
     flushListen();
     saveProgress(currentChunk, getActive()?.currentTime || 0);
-    fetchBooks();
     setScreen("library");
+  };
+
+  // Draggable/clickable scrubber seek.
+  const seekFromEvent = (e) => {
+    const el = getActive();
+    if (!el || !duration) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    el.currentTime = frac * duration;
   };
 
   const deleteBook = async (e, bookId, filePath) => {
@@ -620,72 +614,51 @@ export default function App() {
   const wordCount = activeBook?.word_count || 0;
   const estMinutes = Math.round(wordCount / 150);
 
-  // ---- Derived library data --------------------------------------------------
-  const categories = [...new Set(books.map(b => b.category).filter(Boolean))].sort();
-  const isFinished = (b) => !!b.completed_at || (b.times_completed || 0) > 0;
-  const bookProgressPct = (b) => b.chunk_count ? Math.round(((b.reading_progress?.[0]?.current_chunk || 0) / b.chunk_count) * 100) : 0;
-  const filteredBooks = books.filter(b => {
-    const q = search.trim().toLowerCase();
-    const matchesQ = !q || b.title?.toLowerCase().includes(q) || b.author?.toLowerCase().includes(q);
-    const matchesCat = !activeCategory || b.category === activeCategory;
-    return matchesQ && matchesCat;
-  });
-  const shelves = [
-    { key: "in", label: "In progress", items: filteredBooks.filter(b => !isFinished(b) && (b.reading_progress?.[0]?.current_chunk || 0) > 0) },
-    { key: "new", label: "Not started", items: filteredBooks.filter(b => !isFinished(b) && (b.reading_progress?.[0]?.current_chunk || 0) === 0) },
-    { key: "done", label: "Finished", items: filteredBooks.filter(isFinished) },
-  ].filter(s => s.items.length > 0);
+  // ---- Library handlers passed to <Library> ---------------------------------
+  const onDeleteBook = (e, book) => deleteBook(e, book.id, book.file_path);
+  const onJournalOpen = (book) => { setActiveBook(book); activeBookRef.current = book; setScreen("journal"); };
+  const onSaveEdit = async (book, fields, coverFile) => {
+    let cover_path = book.cover_path || null;
+    if (coverFile) {
+      const up = await uploadCover(book.id, coverFile);
+      if (up.error) { setError(up.error.message); return; }
+      cover_path = up.data;
+    }
+    const { error: upErr } = await updateBook(book.id, {
+      title: fields.title?.trim() || book.title,
+      author: fields.author?.trim() || null,
+      category: fields.category?.trim() || null,
+      cover_path,
+    });
+    if (upErr) { setError(upErr.message); return; }
+    fetchBooks();
+  };
 
-  const renderNav = () => (
-    <div style={{ display: "flex", justifyContent: "center", gap: 6, marginBottom: "1.5rem" }}>
-      {[{ k: "library", l: "Library" }, { k: "goals", l: "Goals" }, { k: "stats", l: "Stats" }].map(t => (
-        <button key={t.k} className={`speed-btn ${screen === t.k ? "active" : ""}`} onClick={() => setScreen(t.k)} style={{ fontSize: 11, padding: "6px 16px" }}>
-          {t.l}
-        </button>
-      ))}
+  const libraryProps = {
+    books, loadingBooks, booksError, recentDone, error,
+    search, setSearch, activeCategory, setActiveCategory,
+    onOpen: (book) => openBook(book),
+    onRepeat: (book) => openBook(book, null, true),
+    onJournal: onJournalOpen,
+    onDelete: onDeleteBook,
+    onFilePick: handleFilePick,
+    pendingUpload, setPendingUpload, onConfirmUpload: handleConfirmUpload, uploading,
+    onSaveEdit,
+  };
+
+  const renderChrome = () => (
+    <div style={{ maxWidth: 620, margin: "0 auto", padding: "20px 16px 8px", display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ flex: 1 }}><TabBar screen={screen} setScreen={setScreen} /></div>
+      <ThemeToggle />
     </div>
   );
 
-  const renderBookCard = (book) => {
-    const prog = book.reading_progress?.[0];
-    const pct = bookProgressPct(book);
-    const lastOpened = prog?.last_opened ? new Date(prog.last_opened).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : null;
-    const finished = isFinished(book);
-    return (
-      <div key={book.id} className="book-card fade-up" onClick={() => openBook(book)}>
-        <button className="delete-btn" onClick={e => deleteBook(e, book.id, book.file_path)}>✕</button>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-          <div style={{ flex: 1, paddingRight: 24 }}>
-            <p style={{ fontSize: "1rem", fontWeight: 600, color: "#e8e0d0", lineHeight: 1.3, marginBottom: 4 }}>{book.title}</p>
-            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555" }}>
-              {book.author ? `${book.author} · ` : ""}{book.word_count?.toLocaleString()} words · ~{Math.round((book.word_count || 0) / 150)} min
-              {lastOpened && ` · ${lastOpened}`}
-            </p>
-            {book.category && <span style={{ display: "inline-block", marginTop: 6, fontFamily: "'Space Mono', monospace", fontSize: 9, color: "#c8a96e", border: "0.5px solid rgba(200,169,110,0.3)", borderRadius: 4, padding: "2px 8px" }}>{book.category}</span>}
-          </div>
-          <div style={{ textAlign: "right", flexShrink: 0 }}>
-            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 12, color: pct > 0 ? "#c8a96e" : "#444" }}>{finished ? "✓" : `${pct}%`}</p>
-            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 9, color: "#444", marginTop: 2 }}>{finished ? "complete" : pct === 0 ? "not started" : "in progress"}</p>
-          </div>
-        </div>
-        <div className="progress-bar" style={{ cursor: "default" }}>
-          <div className="progress-fill" style={{ width: `${finished ? 100 : pct}%`, transition: "none" }} />
-        </div>
-        <div style={{ display: "flex", gap: 6, marginTop: 10 }} onClick={e => e.stopPropagation()}>
-          <button className="btn-ghost" onClick={() => openBook(book, null, true)} style={{ fontSize: 10 }}>↺ Repeat</button>
-          <button className="btn-ghost" onClick={() => { setActiveBook(book); activeBookRef.current = book; setScreen("journal"); }} style={{ fontSize: 10 }}>✎ Journal</button>
-          <button className="btn-ghost" onClick={e => handleEditMeta(e, book)} style={{ fontSize: 10 }}>Edit</button>
-        </div>
-      </div>
-    );
-  };
-
   return (
-    <div style={{ minHeight: "100vh", background: "#0d0d0d", fontFamily: "'Crimson Pro', Georgia, serif", position: "relative", overflow: "hidden" }}>
+    <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font)", position: "relative", overflow: "hidden" }}>
+      <Starfield />
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Space+Mono:wght@400;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: #0d0d0d; }
         @keyframes wave { from { transform: scaleY(0.4); transform-origin: center; } to { transform: scaleY(1.4); transform-origin: center; } }
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
@@ -735,8 +708,6 @@ export default function App() {
         .chip.active { border-color: #c8a96e; color: #c8a96e; background: rgba(200,169,110,0.08); }
       `}</style>
 
-      <div className="orb" style={{ width: 400, height: 400, background: "rgba(200,169,110,0.05)", top: -100, right: -100 }} />
-      <div className="orb" style={{ width: 300, height: 300, background: "rgba(100,60,20,0.07)", bottom: -80, left: -80 }} />
       <audio ref={audioRef0} onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} onLoadedMetadata={handleLoadedMeta} />
       <audio ref={audioRef1} onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} onLoadedMetadata={handleLoadedMeta} />
 
@@ -749,125 +720,25 @@ export default function App() {
         </div>
       )}
 
-      {/* LIBRARY */}
-      {screen === "library" && (
-        <div style={{ maxWidth: 600, margin: "0 auto", padding: "2rem 1rem", position: "relative", zIndex: 1 }}>
-          <div style={{ marginBottom: "1.5rem" }}>
-            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: "0.25em", color: "#c8a96e", textTransform: "uppercase", marginBottom: 6 }}>PDF Audiobook</p>
-            <h1 style={{ fontSize: "clamp(1.6rem, 5vw, 2.2rem)", fontWeight: 300, color: "#e8e0d0", lineHeight: 1.2 }}>Your Library</h1>
+      {/* TABBED SCREENS — chrome stays fixed so the tab pill morphs; content
+          book-flips between tabs via AnimatePresence. */}
+      {(screen === "library" || screen === "goals" || screen === "stats") && (
+        <div style={{ position: "relative", zIndex: 1 }}>
+          {renderChrome()}
+          <div style={{ perspective: 1400 }}>
+            <AnimatePresence mode="wait">
+              <motion.div key={screen}
+                initial={{ opacity: 0, rotateY: 10, y: 12 }}
+                animate={{ opacity: 1, rotateY: 0, y: 0 }}
+                exit={{ opacity: 0, rotateY: -10, y: -8 }}
+                transition={{ duration: 0.3, ease }}
+                style={{ transformOrigin: "left center" }}>
+                {screen === "library" && <Library {...libraryProps} />}
+                {screen === "goals" && <Goals />}
+                {screen === "stats" && <Wrapped />}
+              </motion.div>
+            </AnimatePresence>
           </div>
-
-          {renderNav()}
-
-          {/* datalists for author/category autocomplete */}
-          <datalist id="authors-list">{[...new Set(books.map(b => b.author).filter(Boolean))].map(a => <option key={a} value={a} />)}</datalist>
-          <datalist id="categories-list">{categories.map(c => <option key={c} value={c} />)}</datalist>
-
-          {/* Upload / details form */}
-          {pendingUpload ? (
-            <div className="card fade-up" style={{ marginBottom: "1.5rem" }}>
-              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#c8a96e", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 12 }}>Book details</p>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <input className="lib-input" placeholder="Title" value={pendingUpload.title} onChange={e => setPendingUpload(p => ({ ...p, title: e.target.value }))} />
-                <input className="lib-input" list="authors-list" placeholder="Author (optional)" value={pendingUpload.author} onChange={e => setPendingUpload(p => ({ ...p, author: e.target.value }))} />
-                <input className="lib-input" list="categories-list" placeholder="Category (optional)" value={pendingUpload.category} onChange={e => setPendingUpload(p => ({ ...p, category: e.target.value }))} />
-              </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                <button className="btn-ghost" onClick={() => setPendingUpload(null)} disabled={uploading} style={{ flex: 1, justifyContent: "center" }}>Cancel</button>
-                <button className="btn-icon" onClick={handleConfirmUpload} disabled={uploading} style={{ flex: 1, justifyContent: "center", borderColor: "#c8a96e", color: "#c8a96e" }}>
-                  {uploading ? "Adding…" : "Add to library"}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className={`drop-zone ${dragOver ? "active" : ""}`} style={{ marginBottom: "1.5rem" }}
-              onClick={() => fileInputRef.current?.click()}
-              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={e => { e.preventDefault(); setDragOver(false); handleFilePick(e.dataTransfer.files[0]); }}>
-              <input ref={fileInputRef} type="file" accept=".pdf" style={{ display: "none" }} onChange={e => handleFilePick(e.target.files[0])} />
-              {uploading ? (
-                <div>
-                  <div style={{ width: 24, height: 24, border: "2px solid #c8a96e", borderTopColor: "transparent", borderRadius: "50%", margin: "0 auto 10px", animation: "spin 0.8s linear infinite" }} />
-                  <p style={{ color: "#888", fontSize: 13, animation: "pulse 1.5s ease infinite" }}>{loadingMsg}</p>
-                </div>
-              ) : (
-                <>
-                  <div style={{ fontSize: 28, marginBottom: 8 }}>📚</div>
-                  <p style={{ color: "#888", fontSize: 14, marginBottom: 4 }}>Add a book to your library</p>
-                  <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#444" }}>drop PDF here or click to browse</p>
-                </>
-              )}
-            </div>
-          )}
-
-          {error && <div style={{ background: "rgba(200,60,60,0.08)", border: "0.5px solid rgba(200,60,60,0.25)", borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}><p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#e06060" }}>⚠ {error}</p></div>}
-          {booksError && <div style={{ background: "rgba(200,60,60,0.08)", border: "0.5px solid rgba(200,60,60,0.25)", borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}><p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#e06060" }}>⚠ Couldn't load your library: {booksError}</p></div>}
-
-          {/* Recently finished strip */}
-          {recentDone.length > 0 && (
-            <div style={{ marginBottom: "1.25rem" }}>
-              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 8 }}>Recently finished</p>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                {recentDone.map(rc => (
-                  <div key={rc.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: "#141414", border: "0.5px solid #2a2a2a", borderRadius: 8 }}>
-                    <span style={{ color: "#c8a96e", fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>✓ {rc.books?.title || "Untitled"}</span>
-                    <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", flexShrink: 0, marginLeft: 10 }}>{new Date(rc.completed_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Search + category filter */}
-          {books.length > 0 && (
-            <div style={{ marginBottom: "1.25rem" }}>
-              <input className="lib-input" placeholder="Search by title or author…" value={search} onChange={e => setSearch(e.target.value)} style={{ marginBottom: categories.length ? 10 : 0 }} />
-              {categories.length > 0 && (
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  <button className={`chip ${!activeCategory ? "active" : ""}`} onClick={() => setActiveCategory("")}>All</button>
-                  {categories.map(c => (
-                    <button key={c} className={`chip ${activeCategory === c ? "active" : ""}`} onClick={() => setActiveCategory(c)}>{c}</button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {loadingBooks ? (
-            <div style={{ textAlign: "center", padding: "2rem" }}><div style={{ width: 24, height: 24, border: "2px solid #c8a96e", borderTopColor: "transparent", borderRadius: "50%", margin: "0 auto", animation: "spin 0.8s linear infinite" }} /></div>
-          ) : books.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "3rem 1rem" }}><p style={{ color: "#333", fontSize: 14, fontFamily: "'Space Mono', monospace" }}>No books yet — upload your first PDF above</p></div>
-          ) : filteredBooks.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "2rem 1rem" }}><p style={{ color: "#333", fontSize: 14, fontFamily: "'Space Mono', monospace" }}>No books match your search</p></div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-              {shelves.map(shelf => (
-                <div key={shelf.key}>
-                  <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 10 }}>{shelf.label} · {shelf.items.length}</p>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {shelf.items.map(renderBookCard)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* GOALS */}
-      {screen === "goals" && (
-        <div style={{ maxWidth: 600, margin: "0 auto", padding: "2rem 1rem 0", position: "relative", zIndex: 1 }}>
-          {renderNav()}
-          <Goals />
-        </div>
-      )}
-
-      {/* STATS / WRAPPED */}
-      {screen === "stats" && (
-        <div style={{ maxWidth: 600, margin: "0 auto", padding: "2rem 1rem 0", position: "relative", zIndex: 1 }}>
-          {renderNav()}
-          <Wrapped />
         </div>
       )}
 
@@ -877,161 +748,181 @@ export default function App() {
       )}
 
       {/* PLAYER */}
-      {screen === "player" && (
-        <div style={{ maxWidth: 520, margin: "0 auto", padding: "2rem 1rem", position: "relative", zIndex: 1 }}>
-          <button className="btn-icon" onClick={leavePlayer} style={{ marginBottom: "1.5rem" }}>
-            ← Library
-          </button>
-
-          <div style={{ marginBottom: "1.5rem" }}>
-            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: "0.2em", color: "#c8a96e", textTransform: "uppercase", marginBottom: 6 }}>Now playing</p>
-            <h2 style={{ fontSize: "clamp(1.2rem, 4vw, 1.6rem)", fontWeight: 300, color: "#e8e0d0", lineHeight: 1.3 }}>{activeBook?.title}</h2>
-            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", marginTop: 4 }}>
-              {activeBook?.author ? `${activeBook.author} · ` : ""}{wordCount.toLocaleString()} words · ~{estMinutes} min · {chunks.length} parts
-              {cachedCount > 0 && <span style={{ color: allCached ? "#4ab464" : "#c8a96e" }}> · {cachedCount}/{chunks.length} cached</span>}
-            </p>
-          </div>
-
-          {/* Completion CTA */}
-          {justFinished && (
-            <div className="confirm-box">
-              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#c8a96e", marginBottom: 8 }}>
-                🎉 You finished <strong>{activeBook?.title}</strong>! Capture your takeaways while they're fresh.
-              </p>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn-ghost" onClick={() => setJustFinished(false)} style={{ flex: 1 }}>Later</button>
-                <button className="btn-icon" onClick={() => setScreen("journal")} style={{ flex: 1, borderColor: "#c8a96e", color: "#c8a96e" }}>Write journal</button>
+      <AnimatePresence>
+        {screen === "player" && (
+          <motion.div key="player"
+            initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }}
+            transition={{ type: "spring", stiffness: 320, damping: 34 }}
+            style={{ position: "fixed", inset: 0, zIndex: 70, background: "var(--bg)", overflowY: "auto" }}>
+            <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 320, background: "radial-gradient(120% 80% at 50% -10%, rgba(29,185,84,0.16), transparent 70%)", pointerEvents: "none" }} />
+            <div style={{ maxWidth: 560, margin: "0 auto", padding: "16px 16px 64px", position: "relative", zIndex: 1 }}>
+              {/* Top bar */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 22 }}>
+                <IconButton onClick={collapsePlayer}><ChevronDown size={20} /></IconButton>
+                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.16em", color: "var(--text-3)", textTransform: "uppercase" }}>Now Playing</span>
+                <ThemeToggle />
               </div>
+
+              {/* Cover */}
+              <div style={{ display: "flex", justifyContent: "center", marginBottom: 22 }}>
+                <motion.div layoutId="np-cover" transition={spring} animate={{ scale: isPlaying ? 1 : 0.94 }}
+                  style={{ width: 210, height: 210, borderRadius: 22, overflow: "hidden", boxShadow: "var(--shadow-lg)", background: "linear-gradient(135deg, var(--surface-hi), var(--surface-2))", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+                  {coverUrl(activeBook?.cover_path)
+                    ? <img src={coverUrl(activeBook?.cover_path)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    : <><BookOpen size={58} color="var(--text-3)" style={{ position: "absolute", opacity: 0.25 }} /><span style={{ fontSize: 72, fontWeight: 800, color: "var(--brand)" }}>{(activeBook?.title || "?").charAt(0).toUpperCase()}</span></>}
+                </motion.div>
+              </div>
+
+              {/* Title */}
+              <div style={{ textAlign: "center", marginBottom: 18 }}>
+                <h2 style={{ fontSize: 23, lineHeight: 1.2 }}>{activeBook?.title}</h2>
+                <p style={{ color: "var(--text-3)", fontSize: 12.5, marginTop: 5 }}>
+                  {activeBook?.author ? `${activeBook.author} · ` : ""}~{estMinutes} min · {chunks.length} parts
+                  {cachedCount > 0 && <span style={{ color: allCached ? "var(--success)" : "var(--brand)" }}> · {cachedCount}/{chunks.length} cached</span>}
+                </p>
+              </div>
+
+              {/* Completion celebration + CTA */}
+              {justFinished && <Confetti />}
+              <AnimatePresence>
+                {justFinished && (
+                  <motion.div initial={{ opacity: 0, scale: 0.9, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} transition={spring}
+                    style={{ background: "rgba(29,185,84,0.1)", border: "1px solid rgba(29,185,84,0.35)", borderRadius: "var(--r-lg)", padding: 16, marginBottom: 16 }}>
+                    <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 10 }}>
+                      <Sparkles size={15} color="var(--brand)" style={{ verticalAlign: "-2px", marginRight: 6 }} />
+                      You finished <strong>{activeBook?.title}</strong>! Capture your takeaways.
+                    </p>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <Button variant="ghost" full onClick={() => setJustFinished(false)}>Later</Button>
+                      <Button variant="primary" full onClick={() => setScreen("journal")}><PenLine size={15} /> Write journal</Button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Karaoke */}
+              <Card style={{ marginBottom: 16, padding: 18 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <Waveform playing={isPlaying} color="var(--brand)" size={14} />
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Part {currentChunk + 1} / {chunks.length}</span>
+                </div>
+                <Karaoke text={chunks[currentChunk]} currentTime={currentTime} duration={duration} isPlaying={isPlaying} />
+                {isLoading && loadingMsg && (
+                  <p style={{ fontSize: 11.5, color: "var(--brand)", textAlign: "center", marginTop: 10 }}>{loadingMsg}</p>
+                )}
+              </Card>
+
+              {/* Scrubber */}
+              <div style={{ marginBottom: 18 }}>
+                <div onPointerDown={e => { e.currentTarget.setPointerCapture(e.pointerId); seekFromEvent(e); }} onPointerMove={e => { if (e.buttons === 1) seekFromEvent(e); }}
+                  style={{ position: "relative", height: 6, background: "var(--surface-hi)", borderRadius: 6, cursor: "pointer", touchAction: "none" }}>
+                  <div style={{ height: "100%", width: `${duration ? (currentTime / duration) * 100 : 0}%`, background: "var(--brand)", borderRadius: 6 }} />
+                  <div style={{ position: "absolute", top: "50%", left: `${duration ? (currentTime / duration) * 100 : 0}%`, transform: "translate(-50%,-50%)", width: 14, height: 14, borderRadius: "50%", background: "var(--brand)", boxShadow: "0 0 0 4px rgba(29,185,84,0.2)" }} />
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
+                  <span style={{ fontSize: 11, color: "var(--text-3)" }}>{formatTime(currentTime)}</span>
+                  <span style={{ fontSize: 11, color: "var(--text-3)" }}>{formatTime(duration)}</span>
+                </div>
+              </div>
+
+              {/* Controls */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, marginBottom: 20 }}>
+                <IconButton size={44} onClick={() => { if (currentChunk > 0) playChunk(currentChunk - 1); }} disabled={currentChunk === 0}><SkipBack size={18} fill="currentColor" /></IconButton>
+                <IconButton size={44} onClick={() => handleSkip(-10)}><Rewind size={18} /></IconButton>
+                <motion.button whileTap={tap} onClick={handlePlay} disabled={isLoading}
+                  style={{ width: 74, height: 74, borderRadius: "50%", border: "none", background: "var(--brand)", color: "var(--brand-contrast)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "var(--shadow)", animation: isPlaying && !isLoading ? "glowPulse 2.4s ease-in-out infinite" : "none" }}>
+                  {isLoading ? <span style={{ width: 22, height: 22, border: "2px solid var(--brand-contrast)", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                    : isPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" style={{ marginLeft: 3 }} />}
+                </motion.button>
+                <IconButton size={44} onClick={() => handleSkip(10)}><FastForward size={18} /></IconButton>
+                <IconButton size={44} onClick={() => { if (currentChunk < chunks.length - 1) playChunk(currentChunk + 1); }} disabled={currentChunk === chunks.length - 1}><SkipForward size={18} fill="currentColor" /></IconButton>
+              </div>
+
+              {/* Speed */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginBottom: 18 }}>
+                {[0.75, 1, 1.25, 1.5, 1.75].map(s => {
+                  const active = speed === s;
+                  return (
+                    <motion.button key={s} whileTap={{ scale: 0.92 }} onClick={() => { setSpeed(s); if (audioRef0.current) audioRef0.current.playbackRate = s; if (audioRef1.current) audioRef1.current.playbackRate = s; }}
+                      style={{ border: "1px solid " + (active ? "var(--brand)" : "var(--border)"), background: active ? "var(--brand)" : "transparent", color: active ? "var(--brand-contrast)" : "var(--text-3)", borderRadius: "var(--r-full)", padding: "5px 11px", fontSize: 12, fontWeight: active ? 700 : 500, cursor: "pointer" }}>
+                      {s}×
+                    </motion.button>
+                  );
+                })}
+              </div>
+
+              {/* Voice selector */}
+              <div ref={dropdownRef} style={{ position: "relative", marginBottom: 16 }}>
+                <button onClick={() => setShowVoiceDropdown(v => !v)}
+                  style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface)", border: "1px solid " + (showVoiceDropdown ? "var(--brand)" : "var(--border)"), borderRadius: "var(--r-md)", padding: "12px 14px", cursor: "pointer", color: "var(--text)" }}>
+                  <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                    <span style={{ fontSize: 10, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Voice</span>
+                    <span style={{ fontSize: 14, fontWeight: 600 }}>{selectedVoice.label} <span style={{ color: "var(--text-3)", fontWeight: 400, fontSize: 12 }}>· {selectedVoice.desc}</span></span>
+                  </span>
+                  <ChevronDown size={16} color="var(--text-3)" style={{ transform: showVoiceDropdown ? "rotate(180deg)" : "none", transition: "transform 0.2s" }} />
+                </button>
+                <AnimatePresence>
+                  {showVoiceDropdown && (
+                    <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.16 }}
+                      style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0, zIndex: 20, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", boxShadow: "var(--shadow-lg)", maxHeight: 260, overflowY: "auto" }}>
+                      {VOICE_OPTIONS.map(v => (
+                        <div key={v.id} onClick={() => { setSelectedVoice(v); setShowVoiceDropdown(false); setIsPlaying(false); getActive()?.pause(); getIdle()?.pause(); }}
+                          style={{ padding: "11px 14px", cursor: "pointer", borderBottom: "1px solid var(--border)", background: selectedVoice.id === v.id ? "rgba(29,185,84,0.1)" : "transparent" }}>
+                          <p style={{ fontSize: 14, fontWeight: 600, color: selectedVoice.id === v.id ? "var(--brand)" : "var(--text)" }}>{v.label}</p>
+                          <p style={{ fontSize: 11, color: "var(--text-3)" }}>{v.desc} · {v.lang}</p>
+                        </div>
+                      ))}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              {/* Regen confirm */}
+              <AnimatePresence>
+                {showRegenConfirm && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}
+                    style={{ overflow: "hidden", marginBottom: 12 }}>
+                    <div style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", padding: 14 }}>
+                      <p style={{ fontSize: 12.5, color: "var(--text-2)", marginBottom: 10 }}>Regenerate all audio as <strong style={{ color: "var(--text)" }}>{selectedVoice.label}</strong>? Overwrites cached audio for this voice.</p>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <Button variant="ghost" full onClick={() => setShowRegenConfirm(false)}>Cancel</Button>
+                        <Button variant="danger" full onClick={() => handlePregenerate(true)}>Yes, regenerate</Button>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Actions */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+                <Button variant="subtle" size="sm" onClick={() => handlePregenerate(false)} disabled={!!pregenProgress || allCached}>
+                  <Zap size={14} /> {pregenProgress ? `Caching ${pregenProgress.done}/${pregenProgress.total}` : allCached ? "All cached" : "Pre-generate"}
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => setShowRegenConfirm(true)} disabled={!!pregenProgress}><RotateCcw size={14} /> Regenerate</Button>
+                <Button variant="success" size="sm" onClick={handleMarkFinished}><CheckCircle2 size={14} /> Mark finished</Button>
+                <Button variant="ghost" size="sm" onClick={() => setScreen("journal")}><PenLine size={14} /> Journal</Button>
+                <Button variant="subtle" size="sm" onClick={handleDownload} disabled={isLoading || cachedCount === 0} style={{ gridColumn: "1 / -1" }}><Download size={14} /> Download MP3 ({selectedVoice.label})</Button>
+              </div>
+
+              {!allCached && chunks.length > 1 && (
+                <p style={{ fontSize: 11, color: "var(--brand)", textAlign: "center", marginBottom: 8 }}>
+                  Driving? Tap <Zap size={11} style={{ verticalAlign: "-1px" }} /> Pre-generate first for zero interruptions.
+                </p>
+              )}
+
+              {error && <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: "var(--r-md)", padding: "10px 14px" }}><p style={{ fontSize: 12, color: "var(--error)" }}>{error}</p></div>}
             </div>
-          )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-          {/* Voice selector */}
-          <div style={{ marginBottom: 12, position: "relative" }} ref={dropdownRef}>
-            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 6 }}>Voice</p>
-            <button
-              className="btn-icon"
-              onClick={() => setShowVoiceDropdown(v => !v)}
-              style={{ width: "100%", justifyContent: "space-between", padding: "10px 14px", borderColor: showVoiceDropdown ? "#c8a96e" : "#2a2a2a", color: showVoiceDropdown ? "#c8a96e" : "#888" }}
-            >
-              <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
-                <span style={{ fontSize: 13, color: "#e8e0d0", fontFamily: "'Crimson Pro', serif" }}>{selectedVoice.label}</span>
-                <span style={{ fontSize: 10 }}>{selectedVoice.desc}</span>
-              </span>
-              <span style={{ fontSize: 10 }}>{showVoiceDropdown ? "▲" : "▼"}</span>
-            </button>
-            {showVoiceDropdown && (
-              <div className="voice-dropdown">
-                {VOICE_OPTIONS.map(v => (
-                  <div key={v.id} className={`voice-option ${selectedVoice.id === v.id ? "active" : ""}`}
-                    onClick={() => { setSelectedVoice(v); setShowVoiceDropdown(false); setIsPlaying(false); getActive()?.pause(); getIdle()?.pause(); }}>
-                    <p style={{ fontSize: 14, color: "#e8e0d0", fontFamily: "'Crimson Pro', serif", marginBottom: 2 }}>{v.label}</p>
-                    <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#666" }}>{v.desc} · {v.lang}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="card" style={{ marginBottom: 12 }}>
-            {/* Overall progress */}
-            <div style={{ marginBottom: "1.25rem" }}>
-              <div className="progress-bar">
-                <div className="progress-fill" style={{ width: `${progress}%` }} />
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-                <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555" }}>Part {currentChunk + 1} / {chunks.length}</span>
-                <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555" }}>{Math.round(progress)}%</span>
-              </div>
-            </div>
-
-            {/* Time scrubber */}
-            <div style={{ marginBottom: "1.25rem" }}>
-              <div className="progress-bar" onClick={e => {
-                const el = getActive();
-                if (!el || !duration) return;
-                const rect = e.currentTarget.getBoundingClientRect();
-                el.currentTime = ((e.clientX - rect.left) / rect.width) * duration;
-              }}>
-                <div className="progress-fill" style={{ width: `${duration ? (currentTime / duration) * 100 : 0}%` }} />
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
-                <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#444" }}>{formatTime(currentTime)}</span>
-                <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#444" }}>{formatTime(duration)}</span>
-              </div>
-            </div>
-
-            {/* Controls */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: "1.25rem" }}>
-              <button className="btn-ghost" onClick={() => { if (currentChunk > 0) playChunk(currentChunk - 1); }} disabled={currentChunk === 0} style={{ padding: "8px 12px", fontSize: 12 }}>◀◀</button>
-              <button className="btn-icon" onClick={() => handleSkip(-10)} style={{ padding: "8px 10px" }}>−10s</button>
-              <button className="btn-gold" onClick={handlePlay} disabled={isLoading} style={{ width: 64, height: 64, fontSize: 20 }}>
-                {isLoading
-                  ? <div style={{ width: 20, height: 20, border: "2px solid #0d0d0d", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-                  : isPlaying ? <WaveIcon playing={true} /> : <span style={{ marginLeft: 3 }}>▶</span>}
-              </button>
-              <button className="btn-icon" onClick={() => handleSkip(10)} style={{ padding: "8px 10px" }}>+10s</button>
-              <button className="btn-ghost" onClick={() => { if (currentChunk < chunks.length - 1) playChunk(currentChunk + 1); }} disabled={currentChunk === chunks.length - 1} style={{ padding: "8px 12px", fontSize: 12 }}>▶▶</button>
-            </div>
-
-            {/* Speed */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-              <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#444", marginRight: 4 }}>SPEED</span>
-              {[0.75, 1, 1.25, 1.5, 1.75].map(s => (
-                <button key={s} className={`speed-btn ${speed === s ? "active" : ""}`} onClick={() => { setSpeed(s); if (audioRef0.current) audioRef0.current.playbackRate = s; if (audioRef1.current) audioRef1.current.playbackRate = s; }}>{s}×</button>
-              ))}
-            </div>
-
-            {isLoading && loadingMsg && (
-              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#c8a96e", textAlign: "center", marginTop: "1rem", animation: "pulse 1.5s ease infinite" }}>{loadingMsg}</p>
-            )}
-          </div>
-
-          {/* Regen confirm box */}
-          {showRegenConfirm && (
-            <div className="confirm-box">
-              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#c8a96e", marginBottom: 8 }}>
-                Regenerate all audio as <strong>{selectedVoice.label}</strong>? This will overwrite cached audio for this voice.
-              </p>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn-ghost" onClick={() => setShowRegenConfirm(false)} style={{ flex: 1 }}>Cancel</button>
-                <button className="btn-danger" onClick={() => handlePregenerate(true)} style={{ flex: 1 }}>Yes, regenerate</button>
-              </div>
-            </div>
-          )}
-
-          {/* Cache & Download actions */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-            <button className="btn-icon" onClick={() => handlePregenerate(false)} disabled={!!pregenProgress || allCached} style={{ fontSize: 10 }}>
-              {pregenProgress ? `Generating ${pregenProgress.done}/${pregenProgress.total}…` : allCached ? "✓ All cached" : "⚡ Pre-generate"}
-            </button>
-            <button className="btn-danger" onClick={() => setShowRegenConfirm(true)} disabled={!!pregenProgress} style={{ fontSize: 10 }}>
-              ↺ Regenerate voice
-            </button>
-            <button className="btn-icon" onClick={handleMarkFinished} style={{ fontSize: 10, borderColor: "#3a5a3a", color: "#4ab464" }}>
-              ✓ Mark finished
-            </button>
-            <button className="btn-icon" onClick={() => setScreen("journal")} style={{ fontSize: 10 }}>
-              ✎ Journal
-            </button>
-            <button className="btn-icon" onClick={handleDownload} disabled={isLoading || cachedCount === 0} style={{ gridColumn: "1 / -1", fontSize: 10 }}>
-              ↓ Download as MP3 ({selectedVoice.label})
-            </button>
-          </div>
-
-          {/* Pre-generate hint for long drives */}
-          {!allCached && chunks.length > 1 && (
-            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 9, color: "#c8a96e", textAlign: "center", marginBottom: 8 }}>
-              Driving? Tap ⚡ Pre-generate first for uninterrupted playback.
-            </p>
-          )}
-
-          {error && <div style={{ background: "rgba(200,60,60,0.08)", border: "0.5px solid rgba(200,60,60,0.25)", borderRadius: 8, padding: "10px 14px", marginBottom: 12 }}><p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#e06060" }}>⚠ {error}</p></div>}
-
-          <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 9, color: "#2a2a2a", textAlign: "center", marginTop: 8 }}>
-            Gapless playback · Audio cached per voice · Progress auto-saved
-          </p>
-        </div>
-      )}
+      {/* Mini-player (morphs into full player) */}
+      <AnimatePresence>
+        {activeBook && (screen === "library" || screen === "goals" || screen === "stats") && (
+          <MiniPlayer book={activeBook} isPlaying={isPlaying} progress={progress}
+            onToggle={handlePlay} onExpand={() => setScreen("player")} />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

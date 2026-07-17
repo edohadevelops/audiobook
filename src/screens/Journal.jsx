@@ -1,10 +1,14 @@
 import { useState, useEffect } from "react";
+import { motion } from "framer-motion";
+import { ChevronLeft, Star, Check, Lightbulb, Rocket, BookOpenCheck } from "lucide-react";
 import { getJournal, saveJournal } from "../lib/db";
+import { Card, Button, Spinner } from "../components/ui";
+import { listContainer, listItem, ease } from "../theme";
 
 const FIELDS = [
-  { key: "learnings", label: "What I learnt", placeholder: "The big ideas that stuck with you…" },
-  { key: "takeaways", label: "Key takeaways", placeholder: "The points worth remembering…" },
-  { key: "action_steps", label: "Actionable steps", placeholder: "What will you actually do differently?" },
+  { key: "learnings", label: "What I learnt", Icon: BookOpenCheck, placeholder: "The big ideas that stuck with you…" },
+  { key: "takeaways", label: "Key takeaways", Icon: Lightbulb, placeholder: "The points worth remembering…" },
+  { key: "action_steps", label: "Actionable steps", Icon: Rocket, placeholder: "What will you actually do differently?" },
 ];
 
 export default function Journal({ book, onBack }) {
@@ -44,56 +48,63 @@ export default function Journal({ book, onBack }) {
   };
 
   return (
-    <div style={{ maxWidth: 560, margin: "0 auto", padding: "2rem 1rem", position: "relative", zIndex: 1 }}>
-      <button className="btn-icon" onClick={onBack} style={{ marginBottom: "1.5rem" }}>← Back</button>
+    <motion.div initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 24 }} transition={{ duration: 0.28, ease }}
+      style={{ minHeight: "100vh", background: "var(--bg)", position: "relative", zIndex: 1 }}>
+      <div style={{ maxWidth: 560, margin: "0 auto", padding: "20px 16px 60px" }}>
+        <Button variant="ghost" size="sm" onClick={onBack} style={{ marginBottom: 22 }}><ChevronLeft size={16} /> Back</Button>
 
-      <div style={{ marginBottom: "1.5rem" }}>
-        <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: "0.2em", color: "#c8a96e", textTransform: "uppercase", marginBottom: 6 }}>Reading journal</p>
-        <h2 style={{ fontSize: "clamp(1.2rem, 4vw, 1.6rem)", fontWeight: 300, color: "#e8e0d0", lineHeight: 1.3 }}>{book.title}</h2>
-        {book.author && <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", marginTop: 4 }}>{book.author}</p>}
+        <p style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.14em", color: "var(--brand)", textTransform: "uppercase", marginBottom: 6 }}>Reading journal</p>
+        <h1 style={{ fontSize: "clamp(1.5rem, 5vw, 2rem)", lineHeight: 1.2 }}>{book.title}</h1>
+        {book.author && <p style={{ fontSize: 13, color: "var(--text-3)", marginTop: 6 }}>{book.author}</p>}
+
+        {loading ? (
+          <div style={{ display: "flex", justifyContent: "center", padding: "3rem" }}><Spinner /></div>
+        ) : (
+          <motion.div variants={listContainer} initial="hidden" animate="show" style={{ marginTop: 22 }}>
+            {/* Rating */}
+            <motion.div variants={listItem}>
+              <Card style={{ marginBottom: 12, padding: 16 }}>
+                <p style={{ fontSize: 11, fontWeight: 700, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>Rating</p>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {[1, 2, 3, 4, 5].map(n => {
+                    const on = n <= form.rating;
+                    return (
+                      <motion.button key={n} whileTap={{ scale: 0.8 }} whileHover={{ scale: 1.15 }} onClick={() => update("rating", n === form.rating ? 0 : n)}
+                        style={{ background: "transparent", border: "none", cursor: "pointer", padding: 0, lineHeight: 0 }}>
+                        <Star size={28} color={on ? "var(--brand)" : "var(--text-3)"} fill={on ? "var(--brand)" : "none"} />
+                      </motion.button>
+                    );
+                  })}
+                </div>
+              </Card>
+            </motion.div>
+
+            {FIELDS.map(f => (
+              <motion.div key={f.key} variants={listItem}>
+                <Card style={{ marginBottom: 12, padding: 16 }}>
+                  <p style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, fontWeight: 700, color: "var(--brand)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>
+                    <f.Icon size={14} /> {f.label}
+                  </p>
+                  <textarea
+                    className="field"
+                    value={form[f.key]}
+                    onChange={e => update(f.key, e.target.value)}
+                    placeholder={f.placeholder}
+                    rows={4}
+                    style={{ lineHeight: 1.55, resize: "vertical" }}
+                  />
+                </Card>
+              </motion.div>
+            ))}
+
+            {error && <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: "var(--r-md)", padding: "10px 14px", marginBottom: 12 }}><p style={{ fontSize: 12, color: "var(--error)" }}>{error}</p></div>}
+
+            <Button variant={saved ? "success" : "primary"} full size="lg" onClick={handleSave} disabled={saving}>
+              {saving ? <Spinner size={16} /> : saved ? <><Check size={16} /> Saved</> : "Save journal"}
+            </Button>
+          </motion.div>
+        )}
       </div>
-
-      {loading ? (
-        <div style={{ textAlign: "center", padding: "2rem" }}>
-          <div style={{ width: 24, height: 24, border: "2px solid #c8a96e", borderTopColor: "transparent", borderRadius: "50%", margin: "0 auto", animation: "spin 0.8s linear infinite" }} />
-        </div>
-      ) : (
-        <>
-          {/* Rating */}
-          <div className="card" style={{ marginBottom: 12 }}>
-            <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 8 }}>Rating</p>
-            <div style={{ display: "flex", gap: 6 }}>
-              {[1, 2, 3, 4, 5].map(n => (
-                <button key={n} onClick={() => update("rating", n === form.rating ? 0 : n)}
-                  style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 26, lineHeight: 1, color: n <= form.rating ? "#c8a96e" : "#333", transition: "color 0.15s" }}>
-                  ★
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {FIELDS.map(f => (
-            <div className="card" key={f.key} style={{ marginBottom: 12 }}>
-              <p style={{ fontFamily: "'Space Mono', monospace", fontSize: 10, color: "#c8a96e", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 8 }}>{f.label}</p>
-              <textarea
-                value={form[f.key]}
-                onChange={e => update(f.key, e.target.value)}
-                placeholder={f.placeholder}
-                rows={4}
-                style={{ width: "100%", background: "#0d0d0d", border: "0.5px solid #2a2a2a", borderRadius: 8, color: "#e8e0d0", fontFamily: "'Crimson Pro', Georgia, serif", fontSize: 15, lineHeight: 1.5, padding: "10px 12px", resize: "vertical", outline: "none" }}
-                onFocus={e => (e.target.style.borderColor = "#c8a96e")}
-                onBlur={e => (e.target.style.borderColor = "#2a2a2a")}
-              />
-            </div>
-          ))}
-
-          {error && <div style={{ background: "rgba(200,60,60,0.08)", border: "0.5px solid rgba(200,60,60,0.25)", borderRadius: 8, padding: "10px 14px", marginBottom: 12 }}><p style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: "#e06060" }}>⚠ {error}</p></div>}
-
-          <button className="btn-icon" onClick={handleSave} disabled={saving} style={{ width: "100%", padding: "12px", justifyContent: "center", borderColor: saved ? "#4ab464" : "#c8a96e", color: saved ? "#4ab464" : "#c8a96e" }}>
-            {saving ? "Saving…" : saved ? "✓ Saved" : "Save journal"}
-          </button>
-        </>
-      )}
-    </div>
+    </motion.div>
   );
 }

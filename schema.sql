@@ -23,8 +23,13 @@ create table if not exists public.books (
   chunk_count     integer default 0,
   completed_at    timestamptz,
   times_completed integer default 0,
+  cover_path      text,
   created_at      timestamptz default now()
 );
+-- If the books table already exists, add the cover column:
+alter table public.books add column if not exists cover_path text;
+alter table public.books add column if not exists author text;
+alter table public.books add column if not exists category text;
 
 -- ---------------------------------------------------------------------------
 -- audio_chunks — cached TTS audio, one row per (book, chunk, voice)
